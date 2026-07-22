@@ -1,0 +1,42 @@
+# Atlas pipeline hyperparameters -- dataset-agnostic (which dataset to build from is a separate
+# concern, see configs/corpus/). These control how the pipeline processes whatever corpus is
+# configured: how much to sample, which models to use, and clustering/dedup thresholds.
+output_dir: ./data
+
+# Stage 1: tagging
+num_documents: 5000
+tagging_model: Qwen/Qwen2.5-1.5B-Instruct
+tagging_batch_size: 16
+tagging_max_new_tokens: 150
+# {document} placeholder is required; tune the framing to match your corpus's domain (this
+# default assumes short children's stories, e.g. TinyStories) -- if you swap in a differently
+# themed corpus config, you'll likely want a matching atlas config with a different prompt too
+tag_prompt_template: |-
+  Read the short children's story below and list 5 to 10 free-form tags describing it: its characters, setting, theme or moral, plot events, and tone. Respond with ONLY a JSON array of short lowercase tag strings, no other text.
+
+  Story:
+  {document}
+
+  Tags:
+
+# Stage 2: clustering
+embed_model: all-MiniLM-L6-v2
+k: 150
+min_cluster_size: 3
+tags_per_label_prompt: 15
+dedup_threshold: 0.9
+label_batch_size: 16
+label_max_new_tokens: 100
+# {tags} placeholder is required
+label_prompt_template: |-
+  The following words/phrases were assigned to children's stories that share a common concept:
+  {tags}
+
+  Respond with ONLY a JSON object with two fields: "label" (a concise 1-6 word name for this shared concept) and "description" (a one-sentence description). No other text.
+
+# Stage 3: assignment (optional scale-up to more, untagged documents via nearest-centroid lookup)
+enable_scale_up: false
+num_scaleup_documents: 20000
+similarity_floor: 0.3
+
+seed: 1337

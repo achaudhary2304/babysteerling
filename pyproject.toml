@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babysteerling"
+version = "0.1.0"
+description = "A small, laptop-trainable implementation of the Steerling concept-bottleneck language model architecture."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Pietro Barbiero", email = "barbiero@tutanota.com" }]
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "tokenizers",
+]
+
+[project.optional-dependencies]
+# heavier dependencies only needed to build a concept dataset (babysteerling.data.atlas),
+# kept separate so installing the model itself doesn't force them on everyone
+atlas = [
+    "transformers",
+    "sentence-transformers",
+    "scikit-learn",
+    "accelerate",
+]
+
+[project.urls]
+Homepage = "https://github.com/pietrobarbiero/babysteerling"
+
+[tool.setuptools.packages.find]
+include = ["babysteerling*"]

@@ -1,0 +1,17 @@
+babysteerling
+Copyright 2026 Pietro Barbiero
+
+This project independently implements ideas described in Guide Labs' technical report
+"Scaling Inherently Interpretable Language Models" and their public Steerling repository
+(https://github.com/guidelabs/steerling, Apache License 2.0):
+
+  - The Steerling concept-bottleneck architecture (babysteerling/nn.py, loss.py, training.py):
+    a language model whose hidden state is decomposed into known-concept, unknown-concept, and
+    residual contributions, trained with dedicated concept/reconstruction/independence losses.
+  - The Atlas concept-dataset construction pipeline (babysteerling/data/atlas/): tagging text
+    with an LLM, clustering tags into a canonical concept library, and assigning concepts back
+    to a training corpus.
+
+This is an independent, from-scratch implementation written from based on public information, scaled
+down to train in minutes on a laptop rather than at their production scale. This project is
+licensed under the Apache License, Version 2.0 (see LICENSE) in the same spirit as the original.

@@ -1,0 +1,19 @@
+# Default architecture: matches 5_steerlingv2/gpt_steerling.py's current hyperparameters.
+n_embed: 128
+num_heads: 4
+num_kv_heads: 2
+n_layers: 4
+dropout: 0.2
+
+# concept bottleneck
+unknown_ratio: 3     # m (unknown concepts) = unknown_ratio * n (known concepts)
+unknown_rank: null   # set an int (e.g. 32) to low-rank factorize the unknown embedding table
+top_k_known: null    # set an int to sparsify known-concept activations per token
+top_k_unknown: null  # set an int to sparsify unknown-concept activations per token
+p_epsilon: 0.1        # residual dropout
+
+# classification head
+head:
+  type: linear      # linear | mlp
+  tie_weights: true  # tie head weights to the token embedding (linear head only)
+  mlp_hidden: null   # hidden width for the mlp head; defaults to n_embed if null

@@ -1,0 +1,19 @@
+# Optimization schedule and loss weights.
+lr: 3e-4
+min_lr: 3e-5
+warmup_steps: 200
+max_steps: 5000
+eval_interval: 200
+eval_iters: 50
+grad_clip: 1.0
+weight_decay: 0.1
+
+# loss term weights (paper's Eq. 15: L = L_lm + lambda_concept*L_concept + lambda_rec*L_rec + lambda_indep*L_indep)
+lambda_concept: 1.0
+lambda_rec: 1.0
+lambda_indep: 1.0
+
+# sanity-check generation at the end of training
+gen_max_new_tokens: 500
+gen_temperature: 0.8
+gen_top_k: 50

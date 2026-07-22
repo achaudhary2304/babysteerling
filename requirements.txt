@@ -1,0 +1,12 @@
+numpy
+torch
+tiktoken
+tokenizers
+pytorch-lightning
+transformers
+sentence-transformers
+scikit-learn
+accelerate
+hydra-core
+hydra-joblib-launcher
+wandb

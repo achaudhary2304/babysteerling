@@ -1,0 +1,10 @@
+# Masked-diffusion backbone (block-causal attention: bidirectional within a block of
+# diff_block_len tokens, causal across blocks), matching 3_steerling/steerling.py's Causal
+# Diffusion architecture. Everything else inherits from base -- the concept bottleneck, losses,
+# and classification head are unaffected by which backbone produces the hidden state.
+defaults:
+  - base
+  - _self_
+
+backbone_type: diffusion
+diff_block_len: 32   # data.block_size must be divisible by this

@@ -5,6 +5,11 @@ num_kv_heads: 2
 n_layers: 4
 dropout: 0.2
 
+# backbone: causal (next-token prediction, is_causal=True attention) or diffusion (masked
+# diffusion objective, block-causal attention -- see configs/model/diffusion.yaml)
+backbone_type: causal
+diff_block_len: null  # required when backbone_type: diffusion (block_size must be divisible by it)
+
 # concept bottleneck
 unknown_ratio: 3     # m (unknown concepts) = unknown_ratio * n (known concepts)
 unknown_rank: null   # set an int (e.g. 32) to low-rank factorize the unknown embedding table

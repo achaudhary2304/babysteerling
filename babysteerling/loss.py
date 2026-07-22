@@ -52,12 +52,21 @@ class ReconstructionLoss(nn.Module):
     """MSE between the unknown head's u_hat and its ground-truth target (h minus the known
     concepts' contribution). Trains the unknown head to capture exactly what the known
     concepts don't, rather than an arbitrary or redundant transformation of h.
+
+    `mask`, if given, restricts the loss to those positions only (e.g. the diffusion backbone's
+    corruption mask -- only masked positions have a meaningful prediction target there). `None`
+    (default) uses every position, correct for the causal backbone where every position does.
     """
 
-    def forward(self, u_hat, u_hat_gt):
+    def forward(self, u_hat, u_hat_gt, mask=None):
         if u_hat_gt is None:
             return torch.tensor(0.0, device=u_hat.device)
-        return ((u_hat - u_hat_gt) ** 2).mean()  # shape: [B, T, d] -> scalar
+        if mask is None:
+            return ((u_hat - u_hat_gt) ** 2).mean()  # shape: [B, T, d] -> scalar
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=u_hat.device)
+        diff = u_hat[mask] - u_hat_gt[mask]  # shape: [B, T, d] -> [n_masked, d]
+        return (diff ** 2).mean()
 
 
 class IndependenceLoss(nn.Module):
@@ -91,19 +100,28 @@ _indep_loss_fn = IndependenceLoss()
 
 
 def compute_losses(logits, targets, intermediates, doc_spans,
-                    lambda_concept=1.0, lambda_rec=1.0, lambda_indep=1.0):
+                    lambda_concept=1.0, lambda_rec=1.0, lambda_indep=1.0, mask=None):
     """Combine all four loss terms into the total training objective.
 
-    logits/targets: the model's next-token predictions and the ground-truth next tokens.
+    logits/targets: the model's token predictions and the ground-truth tokens they should
+    match. `mask`, if given (e.g. the diffusion backbone's corruption mask from
+    babysteerling.diffusion.corrupt), restricts the LM and reconstruction losses to those
+    positions only -- the ones that actually had something to predict. `None` (default) scores
+    every position, correct for the causal backbone's next-token objective.
     intermediates: the dict returned by nn.py's ConceptBottleneck.forward().
     Returns (total_loss, components) where components is a plain dict of floats, handy for
     logging each term separately (console / W&B) without re-running the forward pass.
     """
     B, T, C = logits.shape
-    lm_loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))  # shape: [B, T, vocab] -> [B*T, vocab] vs [B*T]
+    if mask is None:
+        lm_loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))  # shape: [B, T, vocab] -> [B*T, vocab] vs [B*T]
+    elif mask.sum() == 0:
+        lm_loss = torch.tensor(0.0, device=logits.device)
+    else:
+        lm_loss = F.cross_entropy(logits[mask], targets[mask])  # shape: [B, T, vocab] -> [n_masked, vocab] vs [n_masked]
 
     concept_loss = _concept_loss_fn(intermediates['k'], doc_spans)
-    rec_loss = _rec_loss_fn(intermediates['u_hat'], intermediates['u_hat_gt'])
+    rec_loss = _rec_loss_fn(intermediates['u_hat'], intermediates['u_hat_gt'], mask=mask)
     indep_loss = _indep_loss_fn(intermediates['k_hat'], intermediates['u_hat'])
 
     total_loss = lm_loss + lambda_concept * concept_loss + lambda_rec * rec_loss + lambda_indep * indep_loss

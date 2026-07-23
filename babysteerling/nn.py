@@ -195,10 +195,20 @@ class SupervisedConceptHead(nn.Module):
         self.K = nn.Parameter(torch.randn(n, d) * 0.02)  # known concept embedding table, shape: [n, d]
         self.top_k = top_k
 
-    def forward(self, h):
+    def activation(self, h):
         k = torch.sigmoid(self.f(h))  # shape: [B, T, d] -> [B, T, n], per-token concept activations in [0, 1]
-        k = sparsify_top_k(k, self.top_k)
-        k_hat = k @ self.K  # shape: [B, T, n] @ [n, d] -> [B, T, d], weighted sum of concept embeddings
+        return sparsify_top_k(k, self.top_k)
+
+    def embed(self, k):
+        return k @ self.K  # shape: [B, T, n] @ [n, d] -> [B, T, d], weighted sum of concept embeddings
+
+    def forward(self, h):
+        # split into activation()/embed() (rather than one inline forward) so
+        # babysteerling.steering's InterventionModule can wrap activation() alone -- a clean
+        # single-tensor-in/out callable -- to intervene on concept activations without touching
+        # the embedding-sum step
+        k = self.activation(h)
+        k_hat = self.embed(k)
         return k, k_hat
 
     def ground_truth_embedding(self, known_labels):
@@ -228,15 +238,22 @@ class UnsupervisedConceptHead(nn.Module):
             self.B = nn.Parameter(torch.randn(rank, d) * 0.02)  # shape: [rank, d]
         self.top_k = top_k
 
-    def _embed(self, u):
+    def activation(self, h):
+        u = torch.sigmoid(self.g(h))  # shape: [B, T, d] -> [B, T, m]
+        return sparsify_top_k(u, self.top_k)
+
+    def embed(self, u):
         if self.rank is None:
             return u @ self.U  # shape: [B, T, m] @ [m, d] -> [B, T, d]
         return (u @ self.A) @ self.B  # shape: [B, T, m] @ [m, rank] -> [B, T, rank] -> @ [rank, d] -> [B, T, d]
 
     def forward(self, h):
-        u = torch.sigmoid(self.g(h))  # shape: [B, T, d] -> [B, T, m]
-        u = sparsify_top_k(u, self.top_k)
-        u_hat = self._embed(u)
+        # split into activation()/embed() (rather than one inline forward) so
+        # babysteerling.steering's InterventionModule can wrap activation() alone -- a clean
+        # single-tensor-in/out callable -- to intervene on concept activations without touching
+        # the embedding-sum step
+        u = self.activation(h)
+        u_hat = self.embed(u)
         return u, u_hat
 
 

@@ -58,39 +58,3 @@ def ensure_mask_token(tokenizer, mask_token="[MASK]"):
     if tokenizer.token_to_id(mask_token) is None:
         tokenizer.add_special_tokens([mask_token])
     return tokenizer.token_to_id(mask_token)
-
-
-@torch.no_grad()
-def generate(model, mask_token_id, seq_len, vocab_size, gen_steps=32, temperature=0.8, top_k=50):
-    """Basic random-remasking MDM sampler for sanity-checking output only -- not the paper's
-    efficient block-wise KV-cached inference procedure (out of scope here). Operates on any
-    model exposing SteerlingGPT's forward(idx) -> (logits, intermediates) interface; doesn't
-    need to know anything about the concept bottleneck.
-    """
-    device = next(model.parameters()).device
-    model.eval()
-    x = torch.full((1, seq_len), mask_token_id, dtype=torch.long, device=device)  # shape: [1, seq_len], start fully masked
-    masked = torch.ones_like(x, dtype=torch.bool)  # shape: [1, seq_len], tracks which positions are still masked
-
-    for step in range(1, gen_steps + 1):
-        logits, _ = model(x)  # shape: [1, seq_len, vocab_size]
-        target_masked_count = round(seq_len * (1 - step / gen_steps))  # shrink the masked budget linearly over gen_steps
-
-        probs = F.softmax(logits / temperature, dim=-1)  # shape: [1, seq_len, vocab_size]
-        if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)  # shape: [1, seq_len, top_k]
-            probs = torch.where(logits < v[..., [-1]], torch.zeros_like(probs), probs)  # zero out everything below the k-th largest logit
-            probs = probs / probs.sum(dim=-1, keepdim=True)  # renormalize after truncation
-        sampled = torch.multinomial(probs.view(-1, vocab_size), 1).view(1, seq_len)  # shape: [seq_len, vocab_size] -> [seq_len, 1] -> [1, seq_len]
-
-        masked_positions = masked[0].nonzero(as_tuple=True)[0]  # shape: [n_still_masked], indices of masked positions
-        num_to_reveal = max(len(masked_positions) - target_masked_count, 0)
-        if num_to_reveal > 0:
-            # reveal a random subset of currently-masked positions (not necessarily the most
-            # confident ones) -- simplest possible sampler, good enough for a sanity check
-            reveal_idx = masked_positions[torch.randperm(len(masked_positions))[:num_to_reveal]]
-            x[0, reveal_idx] = sampled[0, reveal_idx]
-            masked[0, reveal_idx] = False
-
-    model.train()
-    return x[0].tolist()

@@ -4,31 +4,30 @@ dataset. Independently implements ideas described in Guide Labs' "Scaling Inhere
 Interpretable Language Models" technical report -- see NOTICE for attribution.
 """
 from .loss import ConceptLoss, IndependenceLoss, ReconstructionLoss, compute_losses
-from .nn import (
-    ConceptBottleneck,
-    ConceptLMHead,
-    SteerlingGPT,
-    SupervisedConceptHead,
-    TransformerModel,
-    UnsupervisedConceptHead,
-    build_model,
-)
+from . import nn
+from .model import SteerlingDiffusion, SteerlingGPT, build_model
 from .training import estimate_loss, get_lr, run_batch
+from .steering import steered, injected_at, InterventionModule, AddDirectionStrategy
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "nn",
+
     "SteerlingGPT",
+    "SteerlingDiffusion",
     "build_model",
-    "ConceptBottleneck",
-    "SupervisedConceptHead",
-    "UnsupervisedConceptHead",
-    "ConceptLMHead",
-    "TransformerModel",
+
+    "steered",
+    "injected_at",
+    "InterventionModule",
+    "AddDirectionStrategy",
+
     "ConceptLoss",
     "ReconstructionLoss",
     "IndependenceLoss",
     "compute_losses",
+
     "get_lr",
     "run_batch",
     "estimate_loss",

@@ -29,7 +29,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from babysteerling import diffusion
 from babysteerling.data.utils import build_supervision, get_batch, load_dataset, load_lifted_tokens, load_tokenizer
-from babysteerling.nn import build_model
+from babysteerling.model import build_model
 from babysteerling.training import estimate_diffusion_loss, estimate_loss, get_lr, run_batch, run_diffusion_batch
 
 

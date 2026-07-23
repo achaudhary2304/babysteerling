@@ -113,13 +113,6 @@ def steered(model, direction, gamma, inj_layer):
     AddDirectionStrategy injection -- InterventionModule + UniformPolicy(quantile=1.0). This *is*
     Section 6.2's inference-time steering operation (Eq. 18); restores the original blocks on
     exit either way, so it's safe to use inside eval/metric code.
-
-    No custom "AlwaysPolicy" needed: tracing build_mask's arithmetic shows that at quantile=1.0,
-    the selection threshold becomes the row-wise max of whatever scores the policy produced, and
-    the strict '>' comparison then excludes that max everywhere -- so quantile=1.0 alone already
-    forces "intervene at every position" for *any* policy's scores. UniformPolicy (all-zero
-    scores, i.e. "no preference") is used here simply because its scores are the cheapest to
-    compute; the result is identical to any other policy at this quantile.
     """
     blocks = model.backbone.blocks
     layer_ids = range(inj_layer, len(blocks))
@@ -127,7 +120,10 @@ def steered(model, direction, gamma, inj_layer):
     try:
         for i in layer_ids:
             blocks[i] = InterventionModule(
-                originals[i], AddDirectionStrategy(direction, gamma), UniformPolicy(), quantile=1.0,
+                originals[i],
+                AddDirectionStrategy(direction, gamma),
+                UniformPolicy(),
+                quantile=1.0,
             )
         yield model
     finally:

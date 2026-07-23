@@ -28,7 +28,7 @@ import os
 import hydra
 from omegaconf import DictConfig
 
-from babysteerling.data.atlas import assign_concepts, build_concepts, compute_lifted_tokens, tag_chunks, tokenize_dataset
+from babysteerling.data.babyatlas import assign_concepts, build_concepts, compute_lifted_tokens, tag_chunks, tokenize_dataset
 from babysteerling.data.prepare import download_corpus, train_tokenizer
 from babysteerling.data.utils import combine_jsonl
 

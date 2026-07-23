@@ -28,7 +28,7 @@ import wandb
 from omegaconf import DictConfig, OmegaConf
 
 from babysteerling import diffusion
-from babysteerling.data.utils import load_dataset, load_tokenizer
+from babysteerling.data.utils import build_supervision, get_batch, load_dataset, load_lifted_tokens, load_tokenizer
 from babysteerling.nn import build_model
 from babysteerling.training import estimate_diffusion_loss, estimate_loss, get_lr, run_batch, run_diffusion_batch
 
@@ -83,7 +83,28 @@ def main(cfg: DictConfig):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
 
-    def train_step(split):
+    # Steering (Section 6.2) + steering-training (Section 10.2.4) are entirely opt-in: only
+    # import babysteerling.steering (which requires the optional `steering` extra) when actually
+    # enabled, so `python train.py` with defaults never touches that dependency at all.
+    steering_module = None
+    lifted_tokens = {}
+    if cfg.steering.enabled:
+        from babysteerling import steering as steering_module
+        lifted_tokens = load_lifted_tokens(cfg.data.data_dir)
+        if not lifted_tokens:
+            print("Warning: steering.enabled=true but no lifted_tokens.json found in "
+                  f"{cfg.data.data_dir!r} -- rebuild the dataset with build_dataset.py to compute "
+                  "it. Steering-training steps will fall back to ordinary LM steps until then.")
+
+    def train_step(split, use_steering=False):
+        if use_steering:
+            return steering_module.run_steering_batch(
+                model, tokens, doc_records, doc_starts, n_train, n_concepts, split,
+                cfg.data.block_size, cfg.data.batch_size, device, lifted_tokens,
+                lambda_respond=cfg.steering.lambda_respond, lambda_express=cfg.steering.lambda_express,
+                inj_layer=cfg.steering.inj_layer, tau=cfg.steering.tau, is_diffusion=is_diffusion,
+                mask_token_id=mask_token_id, diff_block_len=cfg.model.diff_block_len,
+            )
         if is_diffusion:
             return run_diffusion_batch(
                 model, tokens, doc_records, doc_starts, n_train, n_concepts, split,
@@ -98,20 +119,33 @@ def main(cfg: DictConfig):
             lambda_indep=cfg.training.lambda_indep,
         )
 
+    def steering_metrics_fn(split):
+        # the opt-in hook estimate_loss/estimate_diffusion_loss call once per split to attach
+        # babysteerling.steering's respond/output-change ability proxies -- None disables it
+        # entirely, both when steering isn't enabled and when a batch has no eligible concept
+        if steering_module is None or not lifted_tokens:
+            return None
+        xb, _, starts = get_batch(tokens, split, cfg.data.block_size, cfg.data.batch_size, n_train, device)
+        doc_spans, _ = build_supervision(doc_records, doc_starts, starts, cfg.data.block_size, n_concepts, device)
+        return steering_module.steering_ability_metrics(
+            model, xb, doc_spans, lifted_tokens, inj_layer=cfg.steering.inj_layer, tau=cfg.steering.tau,
+        )
+
     def eval_losses():
+        fn = steering_metrics_fn if steering_module is not None else None
         if is_diffusion:
             return estimate_diffusion_loss(
                 model, tokens, doc_records, doc_starts, n_train, n_concepts,
                 cfg.data.block_size, cfg.data.batch_size, device, cfg.training.eval_iters,
                 mask_token_id, cfg.model.diff_block_len,
                 lambda_concept=cfg.training.lambda_concept, lambda_rec=cfg.training.lambda_rec,
-                lambda_indep=cfg.training.lambda_indep,
+                lambda_indep=cfg.training.lambda_indep, steering_metrics_fn=fn,
             )
         return estimate_loss(
             model, tokens, doc_records, doc_starts, n_train, n_concepts,
             cfg.data.block_size, cfg.data.batch_size, device, cfg.training.eval_iters,
             lambda_concept=cfg.training.lambda_concept, lambda_rec=cfg.training.lambda_rec,
-            lambda_indep=cfg.training.lambda_indep,
+            lambda_indep=cfg.training.lambda_indep, steering_metrics_fn=fn,
         )
 
     for step in range(cfg.training.max_steps + 1):
@@ -120,7 +154,11 @@ def main(cfg: DictConfig):
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
 
-        train_loss, _ = train_step('train')
+        do_steering_step = (
+            steering_module is not None and lifted_tokens
+            and step > 0 and step % cfg.steering.every_n_steps == 0
+        )
+        train_loss, _ = train_step('train', use_steering=do_steering_step)
 
         optimizer.zero_grad(set_to_none=True)
         train_loss.backward()

@@ -24,6 +24,12 @@ atlas = [
     "scikit-learn",
     "accelerate",
 ]
+# only needed for babysteerling.steering (concept interventions / steering); kept separate since
+# pytorch-concepts pulls in a heavy, unrelated dependency chain (scikit-learn, scipy, pgmpy,
+# networkx, sympy, pytorch-lightning, pytorch-minimize) that the base model doesn't need
+steering = [
+    "pytorch-concepts==1.0.0a5",  # pre-release; exact pin so `pip install -e ".[steering]"` works without --pre
+]
 
 [project.urls]
 Homepage = "https://github.com/pietrobarbiero/babysteerling"

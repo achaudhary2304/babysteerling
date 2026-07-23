@@ -2,13 +2,17 @@
 
     tag_chunks -> build_concepts -> assign_concepts -> tokenize_dataset
 
+plus a post-processing step, compute_lifted_tokens, that derives per-concept token statistics
+from the finished dataset (used by babysteerling.steering for token-level attribution).
+
 Independently implements, at laptop scale, the ideas described in Guide Labs' Atlas pipeline
 (see the project's NOTICE for attribution): LLM-tag a text corpus, cluster the tags into a
 canonical concept library, assign concepts back to the corpus, then tokenize for training.
 """
 from .assign_concepts import assign_concepts
 from .build_concepts import build_concepts
+from .lifted_words import compute_lifted_tokens
 from .tag_chunks import tag_chunks
 from .tokenize_dataset import tokenize_dataset
 
-__all__ = ["tag_chunks", "build_concepts", "assign_concepts", "tokenize_dataset"]
+__all__ = ["tag_chunks", "build_concepts", "assign_concepts", "tokenize_dataset", "compute_lifted_tokens"]

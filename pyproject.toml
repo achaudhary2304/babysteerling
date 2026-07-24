@@ -13,6 +13,7 @@ requires-python = ">=3.9"
 dependencies = [
     "torch",
     "tokenizers",
+    "pytorch-concepts==1.0.0a5"
 ]
 
 [project.optional-dependencies]

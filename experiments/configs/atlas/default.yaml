@@ -39,4 +39,9 @@ enable_scale_up: false
 num_scaleup_documents: 20000
 similarity_floor: 0.3
 
+# Post-processing: per-concept lifted tokens (Section 4.4's lift metric), the token-level
+# attribution signal babysteerling.steering uses -- see babysteerling/data/atlas/lifted_words.py
+lifted_top_k: 50
+lifted_min_support: 5
+
 seed: 1337

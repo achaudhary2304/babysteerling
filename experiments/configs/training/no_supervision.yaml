@@ -1,0 +1,12 @@
+# Ablation baseline (matches 3_steerling/gpt_steerling_no_supervision.py): zero out every
+# concept-related loss term, so only the language modeling loss trains the model. The concept
+# bottleneck architecture is still present (the model still routes through known/unknown/
+# residual), but nothing pushes the known/unknown heads to learn anything meaningful -- useful
+# as a baseline to compare against runs where the concept losses are actually active.
+defaults:
+  - default
+  - _self_
+
+lambda_concept: 0.0
+lambda_rec: 0.0
+lambda_indep: 0.0

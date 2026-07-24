@@ -69,6 +69,20 @@ def load_dataset(data_dir):
     return tokens, doc_records, n_concepts
 
 
+def load_lifted_tokens(data_dir):
+    """Load the per-concept lifted-token statistics written by
+    babysteerling.data.atlas.compute_lifted_tokens (Section 4.4's lift metric) -- the token-level
+    concept attribution signal babysteerling.steering uses for steering-training and the
+    steering-ability metrics. Returns {} if the dataset was built before lifted tokens existed or
+    steering was never enabled for it, so callers that don't need steering never have to check.
+    """
+    path = os.path.join(data_dir, "lifted_tokens.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, 'r', encoding='utf-8') as f:
+        return {int(k): v for k, v in json.load(f).items()}
+
+
 def overlapping_docs(doc_records, doc_starts, window_start, window_end):
     """Find every document whose token span intersects [window_start, window_end).
 

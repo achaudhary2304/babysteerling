@@ -96,6 +96,12 @@ Each run prints train/val loss (broken into `lm`, `concept`, `rec`, `indep` comp
 `training.eval_interval` steps, saves a checkpoint to `./checkpoints/<wandb-run-name>.pt`, and
 logs a short sample generation to W&B at the end.
 
+**Backbone**: `model.backbone_type` picks between `causal` (default, next-token prediction) and
+`diffusion` (masked-diffusion objective + block-causal attention, matching
+`3_steerling/steerling.py`'s architecture) -- `python train.py model=diffusion`. The `[MASK]`
+token needed for the diffusion objective is added to the tokenizer automatically; nothing else
+about the config or training loop needs to change to switch backbones.
+
 ## Adjusting configs / adding a new variant
 
 Each config group is a folder under `configs/`: `data/`, `model/`, `training/`, `wandb/`,

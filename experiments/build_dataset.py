@@ -28,7 +28,7 @@ import os
 import hydra
 from omegaconf import DictConfig
 
-from babysteerling.data.atlas import assign_concepts, build_concepts, tag_chunks, tokenize_dataset
+from babysteerling.data.babyatlas import assign_concepts, build_concepts, compute_lifted_tokens, tag_chunks, tokenize_dataset
 from babysteerling.data.prepare import download_corpus, train_tokenizer
 from babysteerling.data.utils import combine_jsonl
 
@@ -45,6 +45,7 @@ def main(cfg: DictConfig):
     combined_chunk_concepts_path = os.path.join(a.output_dir, "chunk_concepts.jsonl")
     tokens_path = os.path.join(a.output_dir, "steerling_tokens.pt")
     doc_records_path = os.path.join(a.output_dir, "steerling_concepts.pt")
+    lifted_tokens_path = os.path.join(a.output_dir, "lifted_tokens.json")
 
     # --- per-source: download raw text, then LLM-tag it independently ---
     input_paths, tags_paths = [], []
@@ -95,6 +96,13 @@ def main(cfg: DictConfig):
         chunk_concepts_path=combined_chunk_concepts_path, tokenizer_path=tokenizer_path,
         tokens_output_path=tokens_path, concepts_output_path=doc_records_path,
         boundary_token=c.boundary_token,
+    )
+
+    # post-processing: per-concept lifted tokens (Section 4.4), the token-level attribution
+    # signal babysteerling.steering needs for steering-training and its ability metrics
+    compute_lifted_tokens(
+        tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_path,
+        top_k=a.lifted_top_k, min_support=a.lifted_min_support,
     )
 
     source_names = ", ".join(s.name for s in c.sources)

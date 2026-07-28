@@ -1,13 +1,12 @@
 """Stage 1: sample documents from a raw text corpus and LLM-tag each with free-form concept tags.
 
-This is the high-recall step of the pipeline: cast a wide net of raw, possibly-redundant tags per
-document. Stage 2 (build_concepts) is what turns this noisy tag pool into a clean, canonical
-concept library -- so it's fine (expected, even) for tags here to overlap or be overly specific.
+The high-recall step: cast a wide net of raw, possibly redundant tags per document. Stage 2
+(build_concepts) turns this noisy tag pool into a clean concept library, so overlapping or
+overly specific tags here are fine, expected even.
 
-Assumes a corpus structured as a single text file with documents separated by a delimiter (e.g.
-TinyStories's "<|endoftext|>") and short enough that one document = one chunk (no within-document
-splitting). Which corpus, its delimiter, and the tagging prompt are all parameters here -- see
-experiments/configs/corpus/ for how a Hydra-driven caller picks them.
+Assumes one text file, documents separated by a delimiter (e.g. TinyStories's "<|endoftext|>"),
+short enough that one document = one chunk. Corpus, delimiter, and prompt are all parameters;
+see experiments/configs/corpus/ for how a Hydra caller picks them.
 """
 import json
 import os
@@ -53,14 +52,13 @@ def parse_tags(output_text):
 def tag_chunks(input_path, output_path, num_documents=5000, document_delimiter="<|endoftext|>",
                prompt_template=DEFAULT_PROMPT_TEMPLATE, model_name="Qwen/Qwen2.5-1.5B-Instruct",
                batch_size=16, max_new_tokens=150, seed=1337, device=None):
-    """Sample `num_documents` documents from `input_path` and LLM-tag each with free-form concept
-    tags, writing one JSON line per successfully-tagged document to `output_path`.
+    """Samples `num_documents` documents from `input_path`, LLM-tags each with free-form concept
+    tags, and writes one JSON line per successfully-tagged document to `output_path`.
 
-    `prompt_template` must contain a `{document}` placeholder; override it (via config) for
-    corpora whose content doesn't fit the default "children's story" framing.
+    `prompt_template` must contain a `{document}` placeholder; override it for corpora that
+    don't fit the default "children's story" framing.
 
-    Idempotent: skips entirely if `output_path` already exists, so re-running a pipeline that
-    calls this doesn't redo expensive LLM inference.
+    Idempotent: skips if `output_path` already exists, so re-running doesn't redo LLM inference.
     """
     if os.path.exists(output_path):
         print(f"Found existing {output_path}, skipping tagging.")

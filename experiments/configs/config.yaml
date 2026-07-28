@@ -14,7 +14,7 @@ seed: 1337
 
 hydra:
   job:
-    # Hydra normally cds into a per-run output dir; we keep the invocation directory instead so
-    # relative paths (e.g. data.data_dir: ./data) resolve against wherever you actually ran the
-    # command from. Hydra still writes its own run config/log under outputs/<date>/<time>/.
+    # Hydra normally changes into a per-run output dir; we keep the invocation directory instead,
+    # so relative paths (e.g. data.data_dir: ./data) resolve from wherever you ran the command.
+    # Hydra still writes its own run config/log under outputs/<date>/<time>/.
     chdir: false

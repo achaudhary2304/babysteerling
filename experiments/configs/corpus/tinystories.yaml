@@ -1,20 +1,18 @@
-# Describes the raw corpus/corpora: where to get them and how they're structured -- nothing
-# about how they're processed (that's atlas.*). `sources` is always a list -- one entry for a
-# single corpus, several for a union. To train on the union of multiple corpora, just add more
-# entries here (or copy this whole file to define a different combination, e.g.
+# Describes the raw corpus/corpora: where to get them and how they're structured. How they're
+# processed is atlas.*, a separate concern. `sources` is always a list, one entry per corpus.
+# To train on a union of corpora, add more entries here (or copy this file, e.g.
 # configs/corpus/my_union.yaml, and run `python build_dataset.py corpus=my_union`). Every source
-# is downloaded, tagged, and assigned independently, but they all share ONE concept library
-# (built from all their tags combined) and ONE tokenizer -- that shared library is what makes
-# "training on the union" mean something, rather than just concatenating unrelated datasets.
+# is downloaded, tagged, and assigned independently, but they all share one concept library and
+# one tokenizer, which is what makes it a real union rather than concatenated datasets.
 #
-# Each source has its own document_delimiter (whatever string its raw file actually uses to
-# separate documents -- different sources are free to use different delimiters). Nothing in
-# babysteerling's code is specific to TinyStories, it just needs plain-text files with documents
-# separated by a delimiter, each short enough to be treated as one chunk.
+# Each source has its own document_delimiter, whatever string its raw file uses to separate
+# documents (sources can differ here). Nothing in babysteerling is specific to TinyStories; it
+# just needs plain-text files with documents separated by a delimiter, each short enough to be
+# one chunk.
 tokenizer_vocab_size: 2000
-# artificial marker the pipeline inserts after every chunk in the *tokenized* stream -- unlike
-# document_delimiter above, this is not read from any source's raw text, so it stays one single
-# value even when sources use different delimiters (see prepare.train_tokenizer()'s docstring)
+# marker the pipeline inserts after every chunk in the tokenized stream. Unlike
+# document_delimiter above, it isn't read from any source's raw text, so it stays one value
+# even when sources use different delimiters (see prepare.train_tokenizer()).
 boundary_token: "<|endoftext|>"
 
 sources:

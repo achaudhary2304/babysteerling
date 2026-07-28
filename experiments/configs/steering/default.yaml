@@ -1,5 +1,5 @@
-# Steering (Section 6.2) + steering-training (Section 10.2.4). Off by default: the base model
-# trains and evaluates exactly as before unless you opt in with `steering.enabled=true`.
+# Steering (Section 6.2) and steering-training (Section 10.2.4). Set enabled: false to train
+# and evaluate the base model as before, with no steering.
 enabled: true
 
 # Injection strength calibration target tau (Eq. 19): gamma = tau / peak(e_c).
@@ -12,6 +12,6 @@ inj_layer: 1
 every_n_steps: 10
 
 # Weights on the two steering-training losses (Eq. 31/32), added on top of the LM loss during
-# steering steps -- concept/reconstruction/independence losses are left out of those steps.
+# steering steps. Concept/reconstruction/independence losses are left out of those steps.
 lambda_respond: 1.0
 lambda_express: 1.0

@@ -1,9 +1,8 @@
-# Product-key known-concept encoder (babysteerling.nn.prototype.ProductKeySelector): factorized
-# row/col retrieval against each concept's own prototype texts. Cost O(sqrt(Kt) + topk_axis**2)
-# per token instead of a dense O(Kt) projection. Requires the dataset to have been built with
-# atlas.enable_prototypes=true (concept_prototypes.json). Everything else inherits from base.
+# Product-key known-concept encoder
+# Requires the dataset to have been built with atlas.enable_prototypes=true (concept_prototypes.json).
 defaults:
   - base
   - _self_
 
+wandb_name: product_key
 known_encoder_type: product_key

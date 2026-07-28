@@ -1,16 +1,13 @@
-# Linear known-concept encoder (babysteerling.nn.prototype.LinearSelector): a single
-# Linear(d, Kt) + topk selects candidates, then the same PrototypePredictor used by product_key
-# scores them against their own prototype texts. Cost O(d*Kt) per token, the same as the dense
-# baseline, so prefer this over product_key.yaml only while Kt is small enough for a dense
-# [d, Kt] projection; switch to product_key once Kt grows past that (100k-1M). Requires the
-# dataset to have been built with atlas.enable_prototypes=true (concept_prototypes.json).
-# Everything else inherits from base.
+# Prototype-based concept encoder:
+# 1) a single linear layer + topk selects concept candidates
+# 2) the backbone yields embedding representations of prototypes of selected concept candidates
+# 3) the similarities between a token and each prototype embeddings yields weights
+# 4) token's concept activation is the convex combination of similarity weights and ground-truth labels associated with each prototype
+# Requires the dataset to have been built with atlas.enable_prototypes=true (concept_prototypes.json).
 defaults:
   - base
   - _self_
 
+wandb_name: linear_selector
 known_encoder_type: linear_selector
-# see base.yaml's use_concept_loss comment: ConceptLoss's gradient only ever reaches candidates
-# already in the top-k here, so it's dropped from training entirely for this encoder instead of
-# left in at a reduced weight.
-use_concept_loss: false
+use_concept_loss: false   # no need to compute concept loss for linear_selector

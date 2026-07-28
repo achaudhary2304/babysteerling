@@ -92,6 +92,7 @@ def main(cfg: DictConfig):
         project=cfg.wandb.project,
         entity=cfg.wandb.entity,
         group=cfg.wandb.group,
+        name=cfg.wandb.name or cfg.model.wandb_name,
         tags=list(cfg.wandb.tags),
         mode=cfg.wandb.mode,
         config=OmegaConf.to_container(cfg, resolve=True),
@@ -145,6 +146,18 @@ def main(cfg: DictConfig):
     wandb.run.summary['n_params_M'] = n_params
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
+
+    # resumable checkpoint, keyed by wandb.group so a crash + rerun of the same command picks
+    # back up instead of restarting from step 0 (see experiments/train_resilient.sh)
+    os.makedirs("./checkpoints", exist_ok=True)
+    resume_path = os.path.join("./checkpoints", f"resume_{cfg.wandb.group or 'default'}.pt")
+    start_step = 0
+    if os.path.exists(resume_path):
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        start_step = ckpt['step'] + 1
+        print(f"Resuming from {resume_path} at step {start_step}")
 
     # steering (Section 6.2) and steering-training (Section 10.2.4) are opt-in: only import
     # babysteerling.steering when cfg.steering.enabled, so a default run never pays for it
@@ -212,7 +225,7 @@ def main(cfg: DictConfig):
             use_concept_loss=cfg.model.use_concept_loss,
         )
 
-    for step in range(cfg.training.max_steps + 1):
+    for step in range(start_step, cfg.training.max_steps + 1):
         current_lr = get_lr(step, cfg.training.lr, cfg.training.min_lr,
                              cfg.training.warmup_steps, cfg.training.max_steps)
         for param_group in optimizer.param_groups:
@@ -228,6 +241,9 @@ def main(cfg: DictConfig):
         train_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
         optimizer.step()
+
+        if step > 0 and step % cfg.training.checkpoint_interval == 0:
+            torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'step': step}, resume_path)
 
         if step % cfg.training.eval_interval == 0:
             losses = eval_losses()
@@ -247,12 +263,22 @@ def main(cfg: DictConfig):
                 **{f'val/{k}': v for k, v in losses['val'].items()},
             })
 
+    if os.path.exists(resume_path):
+        os.remove(resume_path)  # finished cleanly: don't let a later run resume from this
+
     # each run gets its own checkpoint, named after the W&B run: a sweep produces many runs,
-    # not one to resume
+    # not one to resume. Bundled with the config/vocab_size/n_concepts (not just the state_dict),
+    # so it's loadable standalone later for other tests, metrics, or generation without needing
+    # to know the hyperparameters build_model was called with.
     run_name = wandb.run.name or f"run_{int(time.time())}"
     os.makedirs("./checkpoints", exist_ok=True)
     ckpt_path = os.path.join("./checkpoints", f"{run_name}.pt")
-    torch.save(model.state_dict(), ckpt_path)
+    torch.save({
+        'model': model.state_dict(),
+        'config': OmegaConf.to_container(cfg, resolve=True),
+        'vocab_size': vocab_size,
+        'n_concepts': n_concepts,
+    }, ckpt_path)
     print(f"Saved checkpoint to {ckpt_path}")
 
     # sample a short generation and log it to W&B as text, so qualitative output is visible

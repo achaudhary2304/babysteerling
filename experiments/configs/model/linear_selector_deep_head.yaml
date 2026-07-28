@@ -1,13 +1,10 @@
-# Same as linear_selector.yaml, but with the deep_head MLP classification head instead of the
-# tied linear head. See linear_selector.yaml and deep_head.yaml for details.
+# Same as linear_selector.yaml, but with the deep_head ReLU head instead of the linear head
 defaults:
   - base
   - _self_
 
+wandb_name: linear_selector_deep_head
 known_encoder_type: linear_selector
-# see base.yaml's use_concept_loss comment: ConceptLoss's gradient only ever reaches candidates
-# already in the top-k here, so it's dropped from training entirely for this encoder instead of
-# left in at a reduced weight.
 use_concept_loss: false
 
 head:

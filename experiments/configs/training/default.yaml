@@ -5,6 +5,7 @@ warmup_steps: 200
 max_steps: 5000
 eval_interval: 200
 eval_iters: 50
+checkpoint_interval: 200  # how often to save a resumable checkpoint (see train.py's resume logic) -- kept small since MPS crashes have hit as early as ~200 steps
 grad_clip: 1.0
 weight_decay: 0.1
 

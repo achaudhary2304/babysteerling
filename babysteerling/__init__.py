@@ -1,7 +1,7 @@
 """babysteerling: a small, laptop-trainable implementation of the Steerling architecture
-(concept-bottleneck language model) and the Atlas-inspired pipeline used to build its concept
-dataset. Independently implements ideas described in Guide Labs' "Scaling Inherently
-Interpretable Language Models" technical report -- see NOTICE for attribution.
+(concept bottleneck language model) and the Atlas-inspired pipeline used to build its concept
+dataset. Implements ideas from Guide Labs' "Scaling Inherently Interpretable Language Models"
+technical report (see NOTICE).
 """
 from .loss import ConceptLoss, IndependenceLoss, ReconstructionLoss, compute_losses
 from . import nn

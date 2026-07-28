@@ -1,0 +1,10 @@
+# Prototype cross-attention known-concept encoder (babysteerling.nn.prototype.
+# PrototypeCrossAttention): dense scoring against every concept's prototypes, chunked and
+# gradient-checkpointed over the concept library to bound memory. Cost O(Kt) per token, but
+# never holds more than one chunk's intermediates. Requires the dataset to have been built with
+# atlas.enable_prototypes=true (concept_prototypes.json). Everything else inherits from base.
+defaults:
+  - base
+  - _self_
+
+known_encoder_type: prototype_attention

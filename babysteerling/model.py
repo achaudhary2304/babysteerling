@@ -1,19 +1,19 @@
-"""Model architecture: causal transformer backbone + Steerling concept bottleneck + head.
+"""Model architecture: transformer backbone + Steerling concept bottleneck + head.
 
-Independently implements the architecture described in Guide Labs' technical report "Scaling
-Inherently Interpretable Language Models" (see the project's NOTICE for attribution) at a scale
-that trains in minutes on a laptop. The concept bottleneck decomposes the backbone's hidden state
-into three additive, inspectable pieces before the final projection to vocabulary logits:
+Independently implements the architecture from Guide Labs' "Scaling Inherently Interpretable
+Language Models" (see NOTICE), at a scale that trains in minutes on a laptop.
+
+The concept bottleneck splits the backbone's hidden state into three parts that add back up to
+it, before the final projection to vocabulary logits:
 
     h_bar = k_hat (known concepts) + u_hat (unknown concepts) + epsilon (residual)
 
-Intuition: instead of letting the model use its hidden state however it wants, we force part of
-it to route through a small set of human-labeled "known" concepts (supervised by a concept
-library -- see babysteerling.data.atlas for how to build one), part through a larger set of free
-"unknown" concepts the model discovers on its own, and let a residual mop up whatever's left.
-Because the final head is linear, every output logit is then an exact sum of a known-concept
-contribution, an unknown-concept contribution, and a residual contribution -- which is what makes
-the model's predictions attributable back to specific concepts.
+Idea: instead of letting the model use its hidden state however it wants, force part of it
+through a small set of human-labeled "known" concepts (see babysteerling.data.atlas for how the
+concept library is built), part through a larger set of "unknown" concepts the model discovers on
+its own, and let a residual catch whatever's left. Since the final head is linear, every output
+logit is an exact sum of a known-concept part, an unknown-concept part, and a residual part. That
+is what lets us trace a prediction back to specific concepts.
 """
 
 import torch
@@ -28,23 +28,21 @@ from .nn.predictor import LinearEmbeddingToConcept, ReluEmbeddingToConcepts
 class SteerlingGPT(nn.Module):
     """Backbone + concept bottleneck + head, as one module.
 
-    Wrapping everything in a single nn.Module (rather than passing three separate objects
-    around) means model.parameters() and model.state_dict() naturally deduplicate the tied
-    embedding/head weight via PyTorch's built-in traversal.
+    One nn.Module instead of three separate objects, so model.parameters() and
+    model.state_dict() automatically dedupe the tied embedding/head weight.
 
-    backbone_type="causal" (default): plain next-token-prediction attention (see
-    MultiHeadAttention). backbone_type="diffusion": block-causal attention (bidirectional within
-    a block of `diff_block_len` tokens, causal across blocks) for use with the masked-diffusion
-    training objective in babysteerling.diffusion. This class only needs to know which mask (if
-    any) attention should use -- it builds that mask once at construction time and stores it as
-    a buffer; it doesn't otherwise know or care about corruption/sampling, which live entirely
-    in babysteerling.diffusion.
+    backbone_type="causal" (default): normal next-token attention. backbone_type="diffusion":
+    block-causal attention (bidirectional inside a block of `diff_block_len` tokens, causal
+    across blocks), for the masked-diffusion objective in babysteerling.diffusion. This class
+    only builds the attention mask; corruption and sampling live in babysteerling.diffusion.
     """
 
     def __init__(self, vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers,
                  dropout, n_concepts, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal"):
+                 head_mlp_hidden=None, backbone_type="causal",
+                 known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
         super().__init__()
         self.block_size = block_size
         self.backbone_type = backbone_type
@@ -52,6 +50,10 @@ class SteerlingGPT(nn.Module):
         self.bottleneck = ConceptBottleneck(
             n_embed, n_concepts, unknown_ratio=unknown_ratio, p_epsilon=p_epsilon,
             unknown_rank=unknown_rank, top_k_known=top_k_known, top_k_unknown=top_k_unknown,
+            known_encoder_type=known_encoder_type, proto_token_ids=proto_token_ids,
+            backbone=self.backbone, topk_axis=topk_axis,
+            chunk_size=chunk_size, key_dim=known_key_dim, use_checkpoint=use_checkpoint,
+            candidates_per_token=candidates_per_token,
         )
         tied_embedding = self.backbone.token_embedding_table.weight if tie_weights else None
         if head_type == "linear":
@@ -92,17 +94,16 @@ class SteerlingGPT(nn.Module):
 
 
 class SteerlingDiffusion(SteerlingGPT):
-    """SteerlingGPT with diffusion-specific forward() signature.
-
-    The only differences are the forward and the generate methods: the diffusion forward() takes a `corruption_mask`
-    argument and returns the corrupted input and the corruption mask, while the generate() method is adapted
-    for diffusion sampling.
+    """SteerlingGPT with a diffusion-specific generate(). Everything else (forward, backbone,
+    bottleneck, head) is unchanged; only the sampling procedure differs.
     """
 
     def __init__(self, vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers,
                  dropout, n_concepts, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None):
+                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
+                 known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
         super().__init__(
             vocab_size=vocab_size,
             block_size=block_size,
@@ -120,7 +121,14 @@ class SteerlingDiffusion(SteerlingGPT):
             head_type=head_type,
             tie_weights=tie_weights,
             head_mlp_hidden=head_mlp_hidden,
-            backbone_type=backbone_type
+            backbone_type=backbone_type,
+            known_encoder_type=known_encoder_type,
+            proto_token_ids=proto_token_ids,
+            topk_axis=topk_axis,
+            chunk_size=chunk_size,
+            known_key_dim=known_key_dim,
+            use_checkpoint=use_checkpoint,
+            candidates_per_token=candidates_per_token,
         )
         assert diff_block_len is not None, "diff_block_len is required when backbone_type='diffusion'"
         from .diffusion import build_block_causal_mask  # local import: diffusion.py doesn't need to import nn.py
@@ -131,10 +139,9 @@ class SteerlingDiffusion(SteerlingGPT):
 
     @torch.no_grad()
     def generate(model, mask_token_id, seq_len, vocab_size, gen_steps=32, temperature=0.8, top_k=50):
-        """Basic random-remasking MDM sampler for sanity-checking output only -- not the paper's
-        efficient block-wise KV-cached inference procedure (out of scope here). Operates on any
-        model exposing SteerlingGPT's forward(idx) -> (logits, intermediates) interface; doesn't
-        need to know anything about the concept bottleneck.
+        """Simple random-remasking sampler for the diffusion model, just to sanity-check output.
+        Not the paper's efficient block-wise, KV-cached inference. Works on any model with
+        SteerlingGPT's forward(idx) -> (logits, intermediates) interface.
         """
         device = next(model.parameters()).device
         model.eval()
@@ -159,8 +166,8 @@ class SteerlingDiffusion(SteerlingGPT):
                 0]  # shape: [n_still_masked], indices of masked positions
             num_to_reveal = max(len(masked_positions) - target_masked_count, 0)
             if num_to_reveal > 0:
-                # reveal a random subset of currently-masked positions (not necessarily the most
-                # confident ones) -- simplest possible sampler, good enough for a sanity check
+                # reveal a random subset of currently-masked positions, not necessarily the most
+                # confident ones: simplest possible sampler, good enough for a sanity check
                 reveal_idx = masked_positions[torch.randperm(len(masked_positions))[:num_to_reveal]]
                 x[0, reveal_idx] = sampled[0, reveal_idx]
                 masked[0, reveal_idx] = False
@@ -172,11 +179,18 @@ class SteerlingDiffusion(SteerlingGPT):
 def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, num_kv_heads=2,
                  n_layers=4, dropout=0.2, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None):
-    """Factory: construct a SteerlingGPT from plain keyword arguments (defaults match this
-    project's baseline config). Takes no framework-specific config object, so it can be called
-    the same way whether or not the caller uses Hydra -- see experiments/train.py for the
-    Hydra-config adapter that unpacks a `cfg.model` group into this call.
+                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
+                 known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
+    """Builds a SteerlingGPT from plain keyword arguments. No config object needed, so it works
+    the same whether the caller uses Hydra or not (see experiments/train.py for the adapter that
+    unpacks `cfg.model` into this call).
+
+    known_encoder_type: "dense" (default, a small MLP over the known concept library),
+    "linear_selector" or "product_key" (score a subset of concepts against their prototype
+    texts), or "prototype_attention" (score all concepts against their prototypes, chunked). See
+    babysteerling.nn.prototype. The last three need proto_token_ids (see
+    babysteerling.data.utils.load_concept_prototype_tokens).
     """
     if backbone_type.lower() == "causal":
         return SteerlingGPT(
@@ -197,6 +211,13 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
             tie_weights=tie_weights,
             head_mlp_hidden=head_mlp_hidden,
             backbone_type=backbone_type,
+            known_encoder_type=known_encoder_type,
+            proto_token_ids=proto_token_ids,
+            topk_axis=topk_axis,
+            chunk_size=chunk_size,
+            known_key_dim=known_key_dim,
+            use_checkpoint=use_checkpoint,
+            candidates_per_token=candidates_per_token,
         )
     elif backbone_type.lower() == "diffusion":
         return SteerlingDiffusion(
@@ -217,7 +238,14 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
             tie_weights=tie_weights,
             head_mlp_hidden=head_mlp_hidden,
             backbone_type=backbone_type,
-            diff_block_len=diff_block_len
+            diff_block_len=diff_block_len,
+            known_encoder_type=known_encoder_type,
+            proto_token_ids=proto_token_ids,
+            topk_axis=topk_axis,
+            chunk_size=chunk_size,
+            known_key_dim=known_key_dim,
+            use_checkpoint=use_checkpoint,
+            candidates_per_token=candidates_per_token,
         )
     else:
         raise ValueError(f"Unsupported backbone_type: {backbone_type}. Supported types are 'causal' and 'diffusion'.")

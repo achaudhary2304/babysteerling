@@ -1,22 +1,19 @@
 """Minimal Hydra entry point for building a concept-annotated dataset (the Atlas pipeline).
 
-Fully self-contained: downloads its own copy of each configured corpus source and trains its
-own tokenizer, then runs the Atlas stages. Supports training on the *union* of several corpus
-sources: each source is downloaded, tagged, and assigned independently, but all sources share
-ONE concept library (built from every source's tags combined) and ONE tokenizer, then everything
-is merged into a single training set. This is what makes "training on the union" meaningful --
-it's not just concatenating unrelated datasets, every source's chunks are assigned concepts from
-the same shared library.
+Self-contained: downloads each configured corpus source, trains its own tokenizer, then runs
+the Atlas stages. Supports training on the union of several sources: each is downloaded, tagged,
+and assigned independently, but they all share one concept library and one tokenizer, then get
+merged into one training set. That shared library is what makes it a real union, not just
+concatenated unrelated datasets: every source's chunks are assigned concepts from the same
+library.
 
-Which corpus/corpora to build from is a config concern, not a code one: `corpus.sources` (see
-configs/corpus/) is a list -- one entry for a single dataset, several for a union. `atlas.*` (see
-configs/atlas/) supplies the dataset-agnostic pipeline hyperparameters, shared across every
-source. To add a dataset to (or remove one from) the union, edit `corpus.sources` -- no code
-changes needed.
+Which corpus/corpora to build from is a config concern: `corpus.sources` (see configs/corpus/)
+is a list, one entry per dataset. `atlas.*` (see configs/atlas/) holds the pipeline
+hyperparameters, shared across every source. Add or remove a dataset from the union by editing
+`corpus.sources`, no code changes needed.
 
-Every stage (including download/tokenizer-training) is idempotent -- skips if its own output
-already exists -- so re-running after a partial failure, or after only changing a later stage's
-hyperparameters, doesn't redo already-finished work.
+Every stage is idempotent: it skips if its own output already exists, so re-running after a
+partial failure, or after changing a later stage's hyperparameters, doesn't redo finished work.
 
 Run with defaults:            python build_dataset.py
 Override any hyperparameter:  python build_dataset.py atlas.num_documents=2000 atlas.k=80
@@ -26,9 +23,12 @@ Build a different corpus:     python build_dataset.py corpus=my_corpus
 import os
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
-from babysteerling.data.babyatlas import assign_concepts, build_concepts, compute_lifted_tokens, tag_chunks, tokenize_dataset
+from babysteerling.data.babyatlas import (
+    assign_concepts, build_concept_prototypes, build_concepts, compute_lifted_tokens, tag_chunks,
+    tokenize_dataset,
+)
 from babysteerling.data.prepare import download_corpus, train_tokenizer
 from babysteerling.data.utils import combine_jsonl
 
@@ -46,8 +46,9 @@ def main(cfg: DictConfig):
     tokens_path = os.path.join(a.output_dir, "steerling_tokens.pt")
     doc_records_path = os.path.join(a.output_dir, "steerling_concepts.pt")
     lifted_tokens_path = os.path.join(a.output_dir, "lifted_tokens.json")
+    prototypes_path = os.path.join(a.output_dir, "concept_prototypes.json")
 
-    # --- per-source: download raw text, then LLM-tag it independently ---
+    # per source: download raw text, then LLM-tag it independently
     input_paths, tags_paths = [], []
     for source in c.sources:
         input_path = os.path.join(raw_dir, f"{source.name}.txt")
@@ -63,13 +64,13 @@ def main(cfg: DictConfig):
         )
         tags_paths.append(tags_path)
 
-    # one shared tokenizer across every source, so a union dataset tokenizes consistently;
-    # boundary_token is independent of each source's own document_delimiter (see prepare.py)
+    # one shared tokenizer across every source, so a union dataset tokenizes consistently.
+    # boundary_token is separate from each source's own document_delimiter (see prepare.py)
     train_tokenizer(input_paths, tokenizer_path, vocab_size=c.tokenizer_vocab_size,
                      boundary_token=c.boundary_token)
 
-    # one shared concept library built from every source's tags combined -- this is what makes
-    # "training on the union" meaningful, rather than just concatenating unrelated datasets
+    # one shared concept library, built from every source's tags combined: this is what makes
+    # it a real union, not just concatenated datasets
     combine_jsonl(tags_paths, combined_tags_path)
     build_concepts(
         tags_path=combined_tags_path, output_path=concepts_path, embed_model_name=a.embed_model,
@@ -79,7 +80,18 @@ def main(cfg: DictConfig):
         label_prompt_template=a.label_prompt_template,
     )
 
-    # --- per-source: assign against the shared library, then merge into one training set ---
+    # optional (off by default, extra LLM cost): synthetic positive/negative/unrelated
+    # prototypes per concept. Only needs concepts.json, so it can run here instead of waiting
+    # on assignment/tokenization
+    if a.enable_prototypes:
+        build_concept_prototypes(
+            concepts_path=concepts_path, output_path=prototypes_path, n_proto=a.n_proto,
+            embed_model_name=a.embed_model, generation_model_name=a.tagging_model,
+            batch_size=a.prototype_batch_size, max_new_tokens=a.prototype_max_new_tokens,
+            prompt_templates=OmegaConf.to_container(a.prototype_prompt_templates),
+        )
+
+    # per source: assign against the shared library, then merge into one training set
     chunk_concepts_paths = []
     for source, tags_path, input_path in zip(c.sources, tags_paths, input_paths):
         chunk_concepts_path = os.path.join(a.output_dir, f"chunk_concepts_{source.name}.jsonl")
@@ -98,8 +110,8 @@ def main(cfg: DictConfig):
         boundary_token=c.boundary_token,
     )
 
-    # post-processing: per-concept lifted tokens (Section 4.4), the token-level attribution
-    # signal babysteerling.steering needs for steering-training and its ability metrics
+    # per-concept lifted tokens (Section 4.4): the token-level attribution babysteerling.steering
+    # needs for steering-training and its ability metrics
     compute_lifted_tokens(
         tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_path,
         top_k=a.lifted_top_k, min_support=a.lifted_min_support,

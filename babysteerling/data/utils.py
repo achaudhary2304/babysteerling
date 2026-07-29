@@ -64,15 +64,72 @@ def load_dataset(data_dir):
     return tokens, doc_records, n_concepts
 
 
+def filter_concepts_by_lifted_tokens(data_dir, doc_records, n_concepts, min_lifted_tokens=5):
+    """Drops concepts with fewer than min_lifted_tokens lifted tokens (not enough token-level
+    signal for Section 4.4's lift metric to mean anything -- not worth a prototype or a slot in
+    the model), renumbering the survivors contiguously. Call this explicitly, right after
+    load_dataset(), when loading data to train or evaluate a model.
+
+    Purely in-memory: concepts.json, concept_prototypes.json, and lifted_tokens.json on disk are
+    never touched, so this recomputes its filtering fresh every call rather than persisting it.
+
+    concept_id is a positional index everywhere downstream (the model's concept embedding table,
+    load_concept_prototype_tokens' lookup), so a dropped concept must not leave a gap -- that's
+    why survivors get renumbered instead of just leaving holes.
+
+    Returns (doc_records, n_concepts, concepts):
+      doc_records: same shape as the input, with each document's concept_ids remapped to the
+          filtered numbering (ids for dropped concepts are simply absent).
+      n_concepts: size of the filtered concept library.
+      concepts: the filtered, renumbered concept list. Each entry keeps its on-disk id under
+          'orig_concept_id' (pass those to load_concept_prototype_tokens) while 'concept_id' is
+          rewritten to the new, dense id (use that with 'label' for concept_id -> label lookups,
+          e.g. the W&B concept-activation table).
+
+    A no-op (concepts returned as-is, just with 'orig_concept_id' added) if lifted_tokens.json
+    doesn't exist -- an older dataset, or one built before lifted tokens existed.
+    """
+    with open(os.path.join(data_dir, "concepts.json")) as f:
+        concept_library = json.load(f)
+    lifted_tokens = load_lifted_tokens(data_dir)
+    if not lifted_tokens:
+        concepts = [{**c, 'orig_concept_id': c['concept_id']} for c in concept_library]
+        return doc_records, n_concepts, concepts
+
+    keep = [c for c in concept_library if len(lifted_tokens.get(c['concept_id'], [])) >= min_lifted_tokens]
+    if len(keep) < len(concept_library):
+        print(f"Dropping {len(concept_library) - len(keep)} concept(s) with fewer than "
+              f"{min_lifted_tokens} lifted tokens ({len(keep)}/{len(concept_library)} remain).")
+
+    concepts = []
+    old_to_new = {}
+    for new_id, c in enumerate(keep):
+        old_to_new[c['concept_id']] = new_id
+        c = dict(c)
+        c['orig_concept_id'] = c['concept_id']
+        c['concept_id'] = new_id
+        concepts.append(c)
+
+    doc_records = [
+        {**doc, 'concept_ids': [old_to_new[c] for c in doc['concept_ids'] if c in old_to_new]}
+        for doc in doc_records
+    ]
+    return doc_records, len(concepts), concepts
+
+
 PROTOTYPE_VALUE_ORDER = ("negative", "unrelated", "positive")  # matches a fixed -1/0/+1 activation axis
 
 
-def load_concept_prototype_tokens(data_dir, tokenizer, n_concepts, filename="concept_prototypes.json",
+def load_concept_prototype_tokens(data_dir, tokenizer, concept_ids, filename="concept_prototypes.json",
                                    max_tokens=32):
     """Loads per-concept prototype texts (babysteerling.data.babyatlas.build_concept_prototypes)
     and tokenizes them with the corpus's own BPE tokenizer.
 
-    Returns an int32 tensor [n_concepts, 3, per_type, Tp]. The 3 axis is always
+    concept_ids: each output row's on-disk concept id, in order -- pass
+    [c['orig_concept_id'] for c in concepts] (see filter_concepts_by_lifted_tokens) so a filtered
+    concept library still looks up the right prototype text per surviving concept.
+
+    Returns an int32 tensor [len(concept_ids), 3, per_type, Tp]. The 3 axis is always
     PROTOTYPE_VALUE_ORDER (negative, unrelated, positive). A concept missing from the file gets
     an all-pad row.
 
@@ -93,7 +150,7 @@ def load_concept_prototype_tokens(data_dir, tokenizer, n_concepts, filename="con
     per_type = len(next(iter(by_concept.values()))[PROTOTYPE_VALUE_ORDER[0]])
 
     all_ids = []
-    for concept_id in range(n_concepts):
+    for concept_id in concept_ids:
         by_type = by_concept.get(concept_id, {})
         for ptype in PROTOTYPE_VALUE_ORDER:
             items = by_type.get(ptype) or [{"text": ""}] * per_type
@@ -102,7 +159,7 @@ def load_concept_prototype_tokens(data_dir, tokenizer, n_concepts, filename="con
 
     Tp = max((len(ids) for ids in all_ids), default=1) or 1
     padded = torch.tensor([ids + [0] * (Tp - len(ids)) for ids in all_ids], dtype=torch.int32)
-    return padded.view(n_concepts, len(PROTOTYPE_VALUE_ORDER), per_type, Tp)
+    return padded.view(len(concept_ids), len(PROTOTYPE_VALUE_ORDER), per_type, Tp)
 
 
 def load_lifted_tokens(data_dir):

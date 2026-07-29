@@ -16,6 +16,7 @@ Use the diffusion backbone:   python train.py model=diffusion
 Run a parallel sweep:         python train.py -m model=base,deep_head training.lr=1e-3,3e-4
 (see README.md for the full explanation of config overrides and multirun)
 """
+import hashlib
 import json
 import os
 
@@ -31,8 +32,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from babysteerling import diffusion
 from babysteerling.data.utils import (
-    build_supervision, get_batch, load_concept_prototype_tokens, load_dataset, load_lifted_tokens,
-    load_tokenizer,
+    build_supervision, filter_concepts_by_lifted_tokens, get_batch, load_concept_prototype_tokens,
+    load_dataset, load_lifted_tokens, load_tokenizer,
 )
 from babysteerling.model import build_model
 from babysteerling.training import estimate_diffusion_loss, estimate_loss, get_lr, run_batch, run_diffusion_batch
@@ -86,6 +87,20 @@ def main(cfg: DictConfig):
         device = 'cpu'
     is_diffusion = cfg.model.backbone_type == "diffusion"
 
+    # resumable checkpoint, keyed by a hash of the resolved config (everything except `wandb`,
+    # which is just logging metadata -- not part of what makes two runs "the same experiment")
+    # so a crash + rerun of the same command picks back up instead of restarting from step 0
+    # (see experiments/train_resilient.sh). Checked before wandb.init() so a resumed run can
+    # reuse its previous wandb id (below) instead of starting a new run that shows up as a short,
+    # disconnected fragment on the dashboard.
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+    config_hash = hashlib.sha256(
+        json.dumps({k: v for k, v in config_dict.items() if k != 'wandb'}, sort_keys=True).encode()
+    ).hexdigest()[:16]
+    os.makedirs("./checkpoints", exist_ok=True)
+    resume_path = os.path.join("./checkpoints", f"resume_{config_hash}.pt")
+    ckpt = torch.load(resume_path, map_location=device) if os.path.exists(resume_path) else None
+
     # W&B logs the fully-resolved config, so every hyperparameter (CLI overrides included) shows
     # up in the run's config panel
     wandb.init(
@@ -95,7 +110,9 @@ def main(cfg: DictConfig):
         name=cfg.wandb.name or cfg.model.wandb_name,
         tags=list(cfg.wandb.tags),
         mode=cfg.wandb.mode,
-        config=OmegaConf.to_container(cfg, resolve=True),
+        config=config_dict,
+        id=ckpt.get('wandb_run_id') if ckpt else None,
+        resume="must" if ckpt and 'wandb_run_id' in ckpt else None,
     )
 
     tok, vocab_size, decode = load_tokenizer(cfg.data.data_dir)
@@ -107,6 +124,12 @@ def main(cfg: DictConfig):
         vocab_size = tok.get_vocab_size()
 
     tokens, doc_records, n_concepts = load_dataset(cfg.data.data_dir)
+    # drop concepts with too little lifted-token signal to be worth a prototype or a model slot;
+    # concepts.json/concept_prototypes.json/lifted_tokens.json on disk stay untouched -- this
+    # filters fresh, in memory, every time data is loaded to train or evaluate
+    doc_records, n_concepts, concepts = filter_concepts_by_lifted_tokens(
+        cfg.data.data_dir, doc_records, n_concepts, min_lifted_tokens=cfg.data.min_lifted_tokens,
+    )
     n_train = int(0.9 * len(tokens))  # 90/10 train/val split
     doc_starts = [d['start'] for d in doc_records]  # sorted (documents are laid out in order), used for binary search
     print(f"Loaded {len(tokens)} tokens, {len(doc_records)} documents, {n_concepts} known concepts")
@@ -116,7 +139,8 @@ def main(cfg: DictConfig):
     proto_token_ids = None
     if cfg.model.known_encoder_type != "dense":
         proto_token_ids = load_concept_prototype_tokens(
-            cfg.data.data_dir, tok, n_concepts, max_tokens=cfg.model.max_prototype_tokens,
+            cfg.data.data_dir, tok, [c['orig_concept_id'] for c in concepts],
+            max_tokens=cfg.model.max_prototype_tokens,
         )
         if proto_token_ids is None:
             raise FileNotFoundError(
@@ -147,13 +171,8 @@ def main(cfg: DictConfig):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
 
-    # resumable checkpoint, keyed by wandb.group so a crash + rerun of the same command picks
-    # back up instead of restarting from step 0 (see experiments/train_resilient.sh)
-    os.makedirs("./checkpoints", exist_ok=True)
-    resume_path = os.path.join("./checkpoints", f"resume_{cfg.wandb.group or 'default'}.pt")
     start_step = 0
-    if os.path.exists(resume_path):
-        ckpt = torch.load(resume_path, map_location=device)
+    if ckpt is not None:
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         start_step = ckpt['step'] + 1
@@ -243,7 +262,10 @@ def main(cfg: DictConfig):
         optimizer.step()
 
         if step > 0 and step % cfg.training.checkpoint_interval == 0:
-            torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'step': step}, resume_path)
+            torch.save({
+                'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'step': step,
+                'wandb_run_id': wandb.run.id,
+            }, resume_path)
 
         if step % cfg.training.eval_interval == 0:
             losses = eval_losses()
@@ -300,8 +322,10 @@ def main(cfg: DictConfig):
     wandb.log({'sample': wandb.Html(f"<pre>{sample_text}</pre>")})
 
     if cfg.model.known_encoder_type == "linear_selector":
-        with open(os.path.join(cfg.data.data_dir, "concepts.json")) as f:
-            concept_names = {c['concept_id']: c['label'] for c in json.load(f)}
+        # concepts (filtered/renumbered by filter_concepts_by_lifted_tokens above) already has
+        # the same concept_id numbering the model's activations use -- not concepts.json's raw
+        # ids, which wouldn't line up if any concepts got dropped
+        concept_names = {c['concept_id']: c['label'] for c in concepts}
         log_concept_activation_table(model, sample_ids, tok, concept_names, cfg.data.block_size, device)
 
     wandb.finish()

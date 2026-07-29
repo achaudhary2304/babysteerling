@@ -4,3 +4,4 @@
 data_dir: ./data
 block_size: 256   # context length (tokens per training window)
 batch_size: 64
+min_lifted_tokens: 5  # drop concepts with fewer lifted tokens than this (see filter_concepts_by_lifted_tokens)

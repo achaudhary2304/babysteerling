@@ -248,6 +248,130 @@ class PrototypePredictor(nn.Module):
         return k_dense
 
 
+class LiftedTokenPredictor(nn.Module):
+    """Predictor: like PrototypePredictor, but scores candidates against each concept's own top-k
+    positive/negative lifted tokens (babysteerling.data.babyatlas.compute_lifted_tokens) instead
+    of LLM-generated prototype sentences (concept_prototypes.json). Each prototype is a single
+    real corpus token, not a multi-token sentence, so there's no sequence to average-pool: a
+    prototype's backbone encoding (squeezed, not _masked_mean_pool'd) is used directly. No
+    "unrelated" category either (unlike PrototypePredictor's 3-way split) -- a lifted token is by
+    construction one of exactly two things, so the value axis is just [-1, +1].
+
+    Aggregation is deliberately not a softmax-weighted average over every prototype the way
+    PrototypePredictor's is. Within the positive group and the negative group independently, only
+    the single best-matching prototype counts: forward value is the true max of that group's
+    softmax weights; backward flows through the sum-of-squares of those weights instead (a
+    straight-through estimator -- plain torch.max on a softmax output isn't literally
+    zero-gradient elsewhere, softmax's own coupling already smears some gradient to every
+    candidate, but it still vanishes with a candidate's own weight; sum-of-squares doesn't remove
+    that either, it's just the simplest function of the weights that still reaches every
+    candidate rather than only the argmax's own path). The two groups' maxes are then combined
+    directly: score = (max_pos - max_neg) / (max_pos + max_neg), a convex combination of exactly
+    +1 and -1 by the (renormalized) positive/negative maxes -- not routed through PrototypePredictor's
+    self.value @ wei_p, since there's no third ("unrelated") category to combine over here.
+
+    forward(x, idx, weight) -> k_dense: idx/weight are both [B, T, C].
+    """
+
+    _NEG_MASK_VALUE = -1e9  # additive mask: large-but-finite, so an all-padded group softmaxes to
+    # uniform (not NaN) -- true -inf can leak NaN into the backward pass even through a later
+    # masked_fill/where, since softmax's own backward formula uses its (possibly all-NaN) output
+
+    def __init__(self, in_embeddings, out_concepts, proto_token_ids, backbone, key_dim=None, top_k=5):
+        super().__init__()
+        d = in_embeddings
+        Kt = out_concepts
+        assert proto_token_ids.shape[0] == Kt, (
+            f"proto_token_ids has {proto_token_ids.shape[0]} concepts, expected {Kt}"
+        )
+        assert tuple(proto_token_ids.shape[1:]) == (2, top_k), (
+            f"proto_token_ids shape {tuple(proto_token_ids.shape[1:])} != (2, {top_k}) "
+            "(axis 1: 0=negative, 1=positive -- see data.utils.load_lifted_token_prototypes)"
+        )
+        self.Kt = Kt
+        self.top_k = top_k
+        # H = key_dim or min(d, 32)  # a scoring key doesn't need the full hidden width
+
+        self.backbone = backbone  # shared with the main model; see module docstring
+        self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
+
+        self.register_buffer('value', torch.tensor([-1.] * top_k + [1.] * top_k), persistent=False)
+        self.proto_query = nn.Linear(d, d, bias=False)
+        # self.proto_key = nn.Linear(d, H, bias=False)
+
+    def _group_max(self, wei_p):
+        """wei_p: [..., top_k] softmax weights for one group (positive or negative). Returns the
+        straight-through max over top_k (see class docstring): forward is the true max, backward
+        flows through the sum-of-squares surrogate instead."""
+        hard_max = wei_p.max(dim=-1).values
+        soft_proxy = (wei_p ** 2).sum(dim=-1)
+        return soft_proxy + (hard_max - soft_proxy).detach()
+
+    def forward(self, x, idx, weight):
+        B, T = x.shape[:2]
+
+        # only encode the distinct concepts some token actually picked, each at most once
+        unique_idx, inverse = torch.unique(idx, return_inverse=True)  # unique_idx: [U]; inverse: [B, T, C]
+        proto_ids_selected = self.proto_token_ids[unique_idx]  # shape: [U, 2, top_k], single token ids
+
+        # validity from the raw (possibly -1 = "no lifted token here") ids, before any clamping --
+        # token id 0 is '<|endoftext|>', a real token that can legitimately be a lifted token
+        # itself, so it must not be mistaken for padding (see data.utils.load_lifted_token_prototypes)
+        valid_selected = proto_ids_selected >= 0  # shape: [U, 2, top_k]
+        proto_ids_safe = proto_ids_selected.clamp(min=0)  # -1 -> 0, a valid (if dummy) embedding id;
+        # only used for the lookup below -- its actual embedding never matters, since invalid
+        # slots are masked out of the softmax before they can affect anything
+
+        # each prototype is exactly one token: a length-1 sequence per prototype, so there's no
+        # sentence to average-pool -- squeeze the trivial length-1 axis back out instead
+        hidden = self.backbone(proto_ids_safe.reshape(-1, 1))  # shape: [U*2*top_k, 1, d]
+        hidden = hidden.squeeze(1).view(unique_idx.shape[0], 2, self.top_k, -1)  # [U, 2, top_k, d]
+        # key_selected = self.proto_key(hidden)  # shape: [U, 2, top_k, H]
+        key_selected = self.proto_query(hidden)  # shape: [U, 2, top_k, H]
+
+        if x.device.type == 'mps':
+            # see PrototypePredictor.forward: MPS crashes when this gather's backward scatters
+            # into a buffer shaped by U, which changes every step. Route through a fixed
+            # [Kt, 2, top_k, H] buffer instead -- cheap since Kt is small (see nn.bottleneck).
+            key_all = key_selected.new_zeros(self.Kt, 2, self.top_k, key_selected.shape[-1])
+            key_all[unique_idx] = key_selected
+            key_cand = key_all[idx]  # shape: [B, T, C, 2, top_k, H]
+            valid_all = proto_ids_selected.new_zeros(self.Kt, 2, self.top_k, dtype=torch.bool)
+            valid_all[unique_idx] = valid_selected
+            valid_cand = valid_all[idx]  # shape: [B, T, C, 2, top_k]
+        else:
+            key_cand = key_selected[inverse]  # shape: [B, T, C, 2, top_k, H]
+            valid_cand = valid_selected[inverse]  # shape: [B, T, C, 2, top_k]
+
+        q = self.proto_query(x)  # shape: [B, T, H]
+        # q = x
+        raw = torch.einsum('bth,btcgkh->btcgk', q, key_cand) / (key_cand.shape[-1] ** 0.5)  # [B, T, C, 2, top_k]
+        raw = raw.masked_fill(~valid_cand, self._NEG_MASK_VALUE)
+        # wei_p = raw.softmax(dim=-1)  # normalize within each group (positive, negative) independently
+        wei_p = raw.flatten(-2, -1).softmax(dim=-1)  # [B, T, C, 2*top_k]
+
+        import os
+        if os.environ.get("DEBUG_LTP"):
+            valid_raw = raw[valid_cand]
+            print(f"[DEBUG_LTP] raw valid stats: min={valid_raw.min().item():.3f} max={valid_raw.max().item():.3f} "
+                  f"mean={valid_raw.mean().item():.3f} std={valid_raw.std().item():.3f} | "
+                  f"wei_p std={wei_p.std().item():.6f} | q norm={q.norm(dim=-1).mean().item():.3f} | "
+                  f"key norm={key_cand.norm(dim=-1).mean().item():.3f}")
+
+        # max_val = self._group_max(wei_p)  # shape: [B, T, C, 2]
+        # max_neg, max_pos = max_val[..., 0], max_val[..., 1]
+
+        # convex combination of exactly +1 (positive) and -1 (negative), weighted by the
+        # renormalized (max_pos, max_neg) pair; eps guards the (should-be-rare) case where a
+        # concept has no valid tokens in either direction at all
+        # candidate_score = ((max_pos - max_neg) / (max_pos + max_neg + 1e-8)) * weight  # shape: [B, T, C]
+        candidate_score = (wei_p @ self.value) * weight  # shape: [B, T, C, 2*top_k] @ [2*top_k] -> [B, T, C]
+
+        k_dense = x.new_zeros(B, T, self.Kt)
+        k_dense.scatter_add_(dim=-1, index=idx, src=candidate_score)  # 0 everywhere not selected
+        return k_dense
+
+
 class PrototypeConceptEncoder(BaseConceptLayer):
     """Combines any Selector (LinearSelector, ProductKeySelector) with a PrototypePredictor
     into the activation()/embed()/forward()/ground_truth_embedding()/.K interface

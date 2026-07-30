@@ -1,18 +1,27 @@
 from torch import nn
 from .encoder import SparseEmbeddingToConcept
 from .prototype import (
-    LinearSelector, ProductKeySelector, PrototypeConceptEncoder, PrototypeCrossAttention,
-    PrototypePredictor,
+    LinearSelector, LiftedTokenPredictor, ProductKeySelector, PrototypeConceptEncoder,
+    PrototypeCrossAttention, PrototypePredictor,
 )
 
 _SELECTOR_TYPES = ("linear_selector", "product_key")
+_PREDICTOR_TYPES = ("prototype", "lifted_tokens")
 
 
 def _build_known_encoder(known_encoder_type, d, n, top_k_known, proto_token_ids, backbone,
-                          topk_axis, chunk_size, key_dim, use_checkpoint, candidates_per_token):
+                          topk_axis, chunk_size, key_dim, use_checkpoint, candidates_per_token,
+                          predictor_type="prototype", lifted_top_k=5):
     """Builds self.known. All four encoder types share the same activation()/embed()/forward()
     signature, so nothing downstream (loss.py, steering.py, training.py) needs to know which one
     is in use.
+
+    predictor_type (linear_selector/product_key only): "prototype" (default -- PrototypePredictor,
+    scores against concept_prototypes.json's LLM-generated sentences) or "lifted_tokens"
+    (LiftedTokenPredictor, scores against each concept's own top lifted tokens instead --
+    proto_token_ids must then come from data.utils.load_lifted_token_prototypes, not
+    load_concept_prototype_tokens). Orthogonal to which selector is in use, same as the
+    selector/predictor split itself.
     """
     if known_encoder_type == "dense":
         return SparseEmbeddingToConcept(d, n, top_k=top_k_known)
@@ -34,7 +43,16 @@ def _build_known_encoder(known_encoder_type, d, n, top_k_known, proto_token_ids,
             selector = LinearSelector(d, n, candidates_per_token=candidates_per_token)
         else:
             selector = ProductKeySelector(d, n, topk_axis=topk_axis, key_dim=key_dim)
-        predictor = PrototypePredictor(d, n, proto_token_ids, backbone, key_dim=key_dim)
+        if predictor_type == "prototype":
+            predictor = PrototypePredictor(d, n, proto_token_ids, backbone, key_dim=key_dim)
+        elif predictor_type == "lifted_tokens":
+            predictor = LiftedTokenPredictor(
+                d, n, proto_token_ids, backbone, key_dim=key_dim, top_k=lifted_top_k,
+            )
+        else:
+            raise ValueError(
+                f"unknown predictor_type: {predictor_type!r} (expected {_PREDICTOR_TYPES!r})"
+            )
         return PrototypeConceptEncoder(d, n, selector, predictor)
     raise ValueError(
         f"unknown known_encoder_type: {known_encoder_type!r} "
@@ -71,13 +89,15 @@ class ConceptBottleneck(nn.Module):
     def __init__(self, d, n, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, known_encoder_type="dense",
                  proto_token_ids=None, backbone=None, topk_axis=5, chunk_size=4096,
-                 key_dim=None, use_checkpoint=True, candidates_per_token=25):
+                 key_dim=None, use_checkpoint=True, candidates_per_token=25,
+                 predictor_type="prototype", lifted_top_k=5):
         super().__init__()
         self.n = n
         self.m = unknown_ratio * n
         self.known = _build_known_encoder(
             known_encoder_type, d, n, top_k_known, proto_token_ids, backbone,
             topk_axis, chunk_size, key_dim, use_checkpoint, candidates_per_token,
+            predictor_type=predictor_type, lifted_top_k=lifted_top_k,
         )
         self.unknown = SparseEmbeddingToConcept(d, self.m, rank=unknown_rank, top_k=top_k_unknown)
         self.residual = ResidualModule(p_epsilon)

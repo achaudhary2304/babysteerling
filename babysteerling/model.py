@@ -42,7 +42,8 @@ class SteerlingGPT(nn.Module):
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
                  head_mlp_hidden=None, backbone_type="causal",
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
-                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
+                 predictor_type="prototype", lifted_top_k=5):
         super().__init__()
         self.block_size = block_size
         self.backbone_type = backbone_type
@@ -54,6 +55,7 @@ class SteerlingGPT(nn.Module):
             backbone=self.backbone, topk_axis=topk_axis,
             chunk_size=chunk_size, key_dim=known_key_dim, use_checkpoint=use_checkpoint,
             candidates_per_token=candidates_per_token,
+            predictor_type=predictor_type, lifted_top_k=lifted_top_k,
         )
         tied_embedding = self.backbone.token_embedding_table.weight if tie_weights else None
         if head_type == "linear":
@@ -103,7 +105,8 @@ class SteerlingDiffusion(SteerlingGPT):
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
                  head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
-                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
+                 predictor_type="prototype", lifted_top_k=5):
         super().__init__(
             vocab_size=vocab_size,
             block_size=block_size,
@@ -129,6 +132,8 @@ class SteerlingDiffusion(SteerlingGPT):
             known_key_dim=known_key_dim,
             use_checkpoint=use_checkpoint,
             candidates_per_token=candidates_per_token,
+            predictor_type=predictor_type,
+            lifted_top_k=lifted_top_k,
         )
         assert diff_block_len is not None, "diff_block_len is required when backbone_type='diffusion'"
         from .diffusion import build_block_causal_mask  # local import: diffusion.py doesn't need to import nn.py
@@ -181,7 +186,8 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
                  head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
-                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25):
+                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
+                 predictor_type="prototype", lifted_top_k=5):
     """Builds a SteerlingGPT from plain keyword arguments. No config object needed, so it works
     the same whether the caller uses Hydra or not (see experiments/train.py for the adapter that
     unpacks `cfg.model` into this call).
@@ -191,6 +197,11 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
     texts), or "prototype_attention" (score all concepts against their prototypes, chunked). See
     babysteerling.nn.prototype. The last three need proto_token_ids (see
     babysteerling.data.utils.load_concept_prototype_tokens).
+
+    predictor_type (linear_selector/product_key only): "prototype" (default) or "lifted_tokens"
+    (score against each concept's own top lifted tokens instead -- proto_token_ids must then come
+    from babysteerling.data.utils.load_lifted_token_prototypes). See nn.bottleneck's
+    _build_known_encoder.
     """
     if backbone_type.lower() == "causal":
         return SteerlingGPT(
@@ -218,6 +229,8 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
             known_key_dim=known_key_dim,
             use_checkpoint=use_checkpoint,
             candidates_per_token=candidates_per_token,
+            predictor_type=predictor_type,
+            lifted_top_k=lifted_top_k,
         )
     elif backbone_type.lower() == "diffusion":
         return SteerlingDiffusion(
@@ -246,6 +259,8 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
             known_key_dim=known_key_dim,
             use_checkpoint=use_checkpoint,
             candidates_per_token=candidates_per_token,
+            predictor_type=predictor_type,
+            lifted_top_k=lifted_top_k,
         )
     else:
         raise ValueError(f"Unsupported backbone_type: {backbone_type}. Supported types are 'causal' and 'diffusion'.")

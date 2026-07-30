@@ -33,7 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 from babysteerling import diffusion
 from babysteerling.data.utils import (
     build_supervision, filter_concepts_by_lifted_tokens, get_batch, load_concept_prototype_tokens,
-    load_dataset, load_lifted_tokens, load_tokenizer,
+    load_dataset, load_lifted_token_prototypes, load_lifted_tokens, load_tokenizer,
 )
 from babysteerling.model import build_model
 from babysteerling.training import estimate_diffusion_loss, estimate_loss, get_lr, run_batch, run_diffusion_batch
@@ -135,19 +135,31 @@ def main(cfg: DictConfig):
     print(f"Loaded {len(tokens)} tokens, {len(doc_records)} documents, {n_concepts} known concepts")
 
     # every encoder except "dense" routes through each concept's own prototype texts
-    # (babysteerling.data.babyatlas.build_concept_prototypes); proto_token_ids stays None for dense
+    # (babysteerling.data.babyatlas.build_concept_prototypes) or, if model.predictor_type ==
+    # "lifted_tokens", each concept's own top lifted tokens instead; proto_token_ids stays None
+    # for dense
     proto_token_ids = None
     if cfg.model.known_encoder_type != "dense":
-        proto_token_ids = load_concept_prototype_tokens(
-            cfg.data.data_dir, tok, [c['orig_concept_id'] for c in concepts],
-            max_tokens=cfg.model.max_prototype_tokens,
-        )
-        if proto_token_ids is None:
-            raise FileNotFoundError(
-                f"model.known_encoder_type={cfg.model.known_encoder_type!r} requires "
-                f"concept_prototypes.json in {cfg.data.data_dir!r}; rebuild the dataset with "
-                "build_dataset.py atlas.enable_prototypes=true"
+        orig_concept_ids = [c['orig_concept_id'] for c in concepts]
+        if cfg.model.predictor_type == "lifted_tokens":
+            proto_token_ids = load_lifted_token_prototypes(
+                cfg.data.data_dir, orig_concept_ids, top_k=cfg.model.lifted_top_k,
             )
+            if proto_token_ids is None:
+                raise FileNotFoundError(
+                    "model.predictor_type='lifted_tokens' requires lifted_tokens.json in "
+                    f"{cfg.data.data_dir!r}; rebuild the dataset with build_dataset.py"
+                )
+        else:
+            proto_token_ids = load_concept_prototype_tokens(
+                cfg.data.data_dir, tok, orig_concept_ids, max_tokens=cfg.model.max_prototype_tokens,
+            )
+            if proto_token_ids is None:
+                raise FileNotFoundError(
+                    f"model.known_encoder_type={cfg.model.known_encoder_type!r} requires "
+                    f"concept_prototypes.json in {cfg.data.data_dir!r}; rebuild the dataset with "
+                    "build_dataset.py atlas.enable_prototypes=true"
+                )
 
     # build_model takes plain kwargs, no Hydra dependency, so this just unpacks the model
     # config group into it
@@ -164,6 +176,7 @@ def main(cfg: DictConfig):
         topk_axis=cfg.model.topk_axis, chunk_size=cfg.model.chunk_size,
         known_key_dim=cfg.model.known_key_dim, use_checkpoint=cfg.model.use_checkpoint,
         candidates_per_token=cfg.model.candidates_per_token,
+        predictor_type=cfg.model.predictor_type, lifted_top_k=cfg.model.lifted_top_k,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"{n_params:.3f} M params")
@@ -184,7 +197,7 @@ def main(cfg: DictConfig):
     lifted_tokens = {}
     if cfg.steering.enabled:
         from babysteerling import steering as steering_module
-        lifted_tokens = load_lifted_tokens(cfg.data.data_dir)
+        lifted_tokens = load_lifted_tokens(cfg.data.data_dir, "positive")
         if not lifted_tokens:
             print("Warning: steering.enabled=true but no lifted_tokens.json found in "
                   f"{cfg.data.data_dir!r}; rebuild the dataset with build_dataset.py to compute "
@@ -273,8 +286,10 @@ def main(cfg: DictConfig):
                   f"val loss {losses['val']['total']:.4f}, "
                   f"train lm_acc {losses['train']['lm_accuracy']:.4f}, "
                   f"val lm_acc {losses['val']['lm_accuracy']:.4f}, "
-                  f"train concept_acc {losses['train']['concept_accuracy']:.4f}, "
-                  f"val concept_acc {losses['val']['concept_accuracy']:.4f}, "
+                  f"train concept_acc_or {losses['train']['concept_accuracy_or']:.4f}, "
+                  f"val concept_acc_or {losses['val']['concept_accuracy_or']:.4f}, "
+                  f"train concept_acc_tok {losses['train']['concept_accuracy_per_token']:.4f}, "
+                  f"val concept_acc_tok {losses['val']['concept_accuracy_per_token']:.4f}, "
                   f"lr {current_lr:.6f}")
             # prefix keys so W&B groups train/*.total and val/*.total as separate lines on the
             # same chart, and each loss component gets its own comparable panel across runs

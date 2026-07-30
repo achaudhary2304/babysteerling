@@ -35,3 +35,8 @@ known_key_dim: null    # shared query/key projection width for any of the three;
 use_checkpoint: true   # prototype_attention only: gradient-checkpoint each chunk to bound backward memory
 # linear_selector/product_key/prototype_attention only: cap on prototype text length in tokens.
 max_prototype_tokens: 32
+# linear_selector/product_key only: "prototype" (default, score against concept_prototypes.json's
+# LLM-generated sentences) or "lifted_tokens" (score against each concept's own top lifted tokens
+# instead -- see configs/model/linear_selector_lifted_tokens.yaml). See nn.prototype.
+predictor_type: prototype
+lifted_top_k: 5  # predictor_type=lifted_tokens only: how many positive/negative lifted tokens per concept

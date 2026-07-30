@@ -46,6 +46,7 @@ def main(cfg: DictConfig):
     tokens_path = os.path.join(a.output_dir, "steerling_tokens.pt")
     doc_records_path = os.path.join(a.output_dir, "steerling_concepts.pt")
     lifted_tokens_path = os.path.join(a.output_dir, "lifted_tokens.json")
+    lifted_tokens_negative_path = os.path.join(a.output_dir, "lifted_tokens_negative.json")
     prototypes_path = os.path.join(a.output_dir, "concept_prototypes.json")
 
     # per source: download raw text, then LLM-tag it independently
@@ -111,10 +112,18 @@ def main(cfg: DictConfig):
     )
 
     # per-concept lifted tokens (Section 4.4): the token-level attribution babysteerling.steering
-    # needs for steering-training and its ability metrics
+    # needs for steering-training and its ability metrics. Positive (over-represented) and
+    # negative (under-represented) associations are saved to separate files -- steering only
+    # consumes the positive one today, the negative file is for inspection/analysis.
     compute_lifted_tokens(
         tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_path,
-        top_k=a.lifted_top_k, min_support=a.lifted_min_support,
+        top_k=a.lifted_top_k, min_support=a.lifted_min_support, metric=a.lifted_metric,
+        direction="positive",
+    )
+    compute_lifted_tokens(
+        tokens_path=tokens_path, doc_records_path=doc_records_path, output_path=lifted_tokens_negative_path,
+        top_k=a.lifted_top_k, min_support=a.lifted_min_support, metric=a.lifted_metric,
+        direction="negative",
     )
 
     source_names = ", ".join(s.name for s in c.sources)

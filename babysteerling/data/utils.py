@@ -91,7 +91,7 @@ def filter_concepts_by_lifted_tokens(data_dir, doc_records, n_concepts, min_lift
     """
     with open(os.path.join(data_dir, "concepts.json")) as f:
         concept_library = json.load(f)
-    lifted_tokens = load_lifted_tokens(data_dir)
+    lifted_tokens = load_lifted_tokens(data_dir, "positive")
     if not lifted_tokens:
         concepts = [{**c, 'orig_concept_id': c['concept_id']} for c in concept_library]
         return doc_records, n_concepts, concepts
@@ -162,17 +162,66 @@ def load_concept_prototype_tokens(data_dir, tokenizer, concept_ids, filename="co
     return padded.view(len(concept_ids), len(PROTOTYPE_VALUE_ORDER), per_type, Tp)
 
 
-def load_lifted_tokens(data_dir):
+def load_lifted_tokens(data_dir, direction):
     """Loads the per-concept lifted-token stats from babysteerling.data.atlas.compute_lifted_tokens
     (Section 4.4's lift metric), the token-level concept attribution babysteerling.steering uses.
     Returns {} if the dataset predates lifted tokens or steering was never enabled, so callers
     that don't need steering never have to check.
     """
-    path = os.path.join(data_dir, "lifted_tokens.json")
+    if direction not in ("positive", "negative"):
+        raise ValueError(f"direction must be 'positive' or 'negative', got {direction!r}")
+
+    if direction == "positive":
+        path = os.path.join(data_dir, "lifted_tokens.json")
+    else:
+        path = os.path.join(data_dir, "lifted_tokens_negative.json")
+
     if not os.path.exists(path):
         return {}
     with open(path, 'r', encoding='utf-8') as f:
         return {int(k): v for k, v in json.load(f).items()}
+
+
+LIFTED_VALUE_ORDER = ("negative", "positive")  # matches a fixed -1/+1 activation axis, no "unrelated"
+
+
+def load_lifted_token_prototypes(data_dir, concept_ids, top_k=5):
+    """Loads each concept's top positive and negative lifted tokens (babysteerling.data.babyatlas.
+    compute_lifted_tokens) as single-token prototypes for nn.prototype.LiftedTokenPredictor --
+    real corpus tokens instead of concept_prototypes.json's LLM-generated prototype sentences.
+
+    concept_ids: each output row's on-disk concept id, in order -- pass
+    [c['orig_concept_id'] for c in concepts] (see filter_concepts_by_lifted_tokens), same
+    convention as load_concept_prototype_tokens.
+
+    Returns an int64 tensor [len(concept_ids), 2, top_k]. Axis 1 is LIFTED_VALUE_ORDER
+    (negative, positive) -- no "unrelated" middle category, since a lifted token is by
+    construction one or the other. A concept with fewer than top_k tokens in a direction (or
+    missing from that file entirely) gets its remaining slots padded with -1, NOT 0 -- token id 0
+    is '<|endoftext|>' (the document-boundary token), a real, frequent corpus token that
+    genuinely does show up as a top lifted token for some concepts (verified: several concepts'
+    negative lifted tokens include it), so 0 can't double as a "no token here" sentinel the way
+    it safely can for load_concept_prototype_tokens's LLM-generated prose (which realistically
+    never contains the literal string "<|endoftext|>"). -1 can never collide with a real token
+    id (always >= 0); LiftedTokenPredictor clamps it to a dummy valid id only for the embedding
+    lookup, after computing its mask from the unclamped -1.
+
+    Returns None if neither lifted_tokens.json nor lifted_tokens_negative.json exists.
+    """
+    by_direction = {d: load_lifted_tokens(data_dir, d) for d in LIFTED_VALUE_ORDER}
+    if not any(by_direction.values()):
+        return None
+
+    rows = []  # [direction][concept] -> [top_k] token ids, padded with -1
+    for direction in LIFTED_VALUE_ORDER:
+        lifted = by_direction[direction]
+        for concept_id in concept_ids:
+            ids = lifted.get(concept_id, [])[:top_k]
+            rows.append(ids + [-1] * (top_k - len(ids)))
+
+    n = len(concept_ids)
+    tensor = torch.tensor(rows, dtype=torch.long).view(len(LIFTED_VALUE_ORDER), n, top_k)
+    return tensor.permute(1, 0, 2).contiguous()  # [n, 2, top_k]
 
 
 def overlapping_docs(doc_records, doc_starts, window_start, window_end):

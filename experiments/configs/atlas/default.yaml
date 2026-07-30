@@ -37,10 +37,11 @@ enable_scale_up: false
 num_scaleup_documents: 20000
 similarity_floor: 0.3
 
-# Post-processing: per-concept lifted tokens (Section 4.4's lift metric), the token-level
-# attribution signal babysteerling.steering uses. See babysteerling/data/babyatlas/lifted_words.py
+# Post-processing: per-concept lifted tokens, the token-level attribution signal
+# babysteerling.steering uses. See babysteerling/data/babyatlas/lifted_words.py
 lifted_top_k: 50
 lifted_min_support: 5
+lifted_metric: log_likelihood  # "log_likelihood" (default) or "lift" (Section 4.4's original metric)
 
 # Post-processing (extra LLM generation cost when enabled): synthetic positive/negative/
 # unrelated text prototypes per concept, see babysteerling/data/babyatlas/concept_prototypes.py

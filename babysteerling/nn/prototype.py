@@ -290,22 +290,18 @@ class LiftedTokenPredictor(nn.Module):
         )
         self.Kt = Kt
         self.top_k = top_k
-        # H = key_dim or min(d, 32)  # a scoring key doesn't need the full hidden width
 
         self.backbone = backbone  # shared with the main model; see module docstring
         self.register_buffer('proto_token_ids', proto_token_ids, persistent=False)
 
         self.register_buffer('value', torch.tensor([-1.] * top_k + [1.] * top_k), persistent=False)
         self.proto_query = nn.Linear(d, d, bias=False)
-        # self.proto_key = nn.Linear(d, H, bias=False)
-
-    def _group_max(self, wei_p):
-        """wei_p: [..., top_k] softmax weights for one group (positive or negative). Returns the
-        straight-through max over top_k (see class docstring): forward is the true max, backward
-        flows through the sum-of-squares surrogate instead."""
-        hard_max = wei_p.max(dim=-1).values
-        soft_proxy = (wei_p ** 2).sum(dim=-1)
-        return soft_proxy + (hard_max - soft_proxy).detach()
+        # cosine similarity between unit vectors concentrates tightly around 0 in high dimensions
+        # (std ~= 1/sqrt(d)), so softmax over raw cosine sims is nearly uniform regardless of how
+        # well-matched a candidate actually is. A learned temperature (CLIP's logit_scale trick)
+        # lets softmax sharpen as needed while staying bounded -- clamped in forward() so it can
+        # never grow back into the unbounded-magnitude problem cosine similarity was meant to fix.
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
 
     def forward(self, x, idx, weight):
         B, T = x.shape[:2]
@@ -326,8 +322,12 @@ class LiftedTokenPredictor(nn.Module):
         # sentence to average-pool -- squeeze the trivial length-1 axis back out instead
         hidden = self.backbone(proto_ids_safe.reshape(-1, 1))  # shape: [U*2*top_k, 1, d]
         hidden = hidden.squeeze(1).view(unique_idx.shape[0], 2, self.top_k, -1)  # [U, 2, top_k, d]
-        # key_selected = self.proto_key(hidden)  # shape: [U, 2, top_k, H]
-        key_selected = self.proto_query(hidden)  # shape: [U, 2, top_k, H]
+        # x and h are compared in the exact same learned space (same proto_query for both), so
+        # nothing bounds the raw dot product's magnitude -- gradients on proto_query get pulled
+        # from both its "query" and "key" role every step, reinforcing growth along its own
+        # dominant direction. Cosine similarity removes that degree of freedom: only the angle
+        # between x and h matters, not how large proto_query's weights have grown.
+        key_selected = F.normalize(self.proto_query(hidden), dim=-1)  # shape: [U, 2, top_k, H]
 
         if x.device.type == 'mps':
             # see PrototypePredictor.forward: MPS crashes when this gather's backward scatters
@@ -343,28 +343,20 @@ class LiftedTokenPredictor(nn.Module):
             key_cand = key_selected[inverse]  # shape: [B, T, C, 2, top_k, H]
             valid_cand = valid_selected[inverse]  # shape: [B, T, C, 2, top_k]
 
-        q = self.proto_query(x)  # shape: [B, T, H]
-        # q = x
-        raw = torch.einsum('bth,btcgkh->btcgk', q, key_cand) / (key_cand.shape[-1] ** 0.5)  # [B, T, C, 2, top_k]
+        q = F.normalize(self.proto_query(x), dim=-1)  # shape: [B, T, H]
+        raw = torch.einsum('bth,btcgkh->btcgk', q, key_cand)  # [B, T, C, 2, top_k], cosine similarity in [-1, 1]
+        # clamp the log-value, not exp()'s result: exp() overflows to inf before a post-hoc clamp
+        # could catch it, and inf's gradient combined with clamp's zero-grad region there
+        # produces 0*inf = nan for logit_scale -- silently reintroducing the same failure this
+        # temperature exists to prevent.
+        scale = self.logit_scale.clamp(max=math.log(100)).exp()  # bounded temperature, see __init__
+        raw = raw * scale
         raw = raw.masked_fill(~valid_cand, self._NEG_MASK_VALUE)
-        # wei_p = raw.softmax(dim=-1)  # normalize within each group (positive, negative) independently
         wei_p = raw.flatten(-2, -1).softmax(dim=-1)  # [B, T, C, 2*top_k]
-
-        import os
-        if os.environ.get("DEBUG_LTP"):
-            valid_raw = raw[valid_cand]
-            print(f"[DEBUG_LTP] raw valid stats: min={valid_raw.min().item():.3f} max={valid_raw.max().item():.3f} "
-                  f"mean={valid_raw.mean().item():.3f} std={valid_raw.std().item():.3f} | "
-                  f"wei_p std={wei_p.std().item():.6f} | q norm={q.norm(dim=-1).mean().item():.3f} | "
-                  f"key norm={key_cand.norm(dim=-1).mean().item():.3f}")
-
-        # max_val = self._group_max(wei_p)  # shape: [B, T, C, 2]
-        # max_neg, max_pos = max_val[..., 0], max_val[..., 1]
 
         # convex combination of exactly +1 (positive) and -1 (negative), weighted by the
         # renormalized (max_pos, max_neg) pair; eps guards the (should-be-rare) case where a
         # concept has no valid tokens in either direction at all
-        # candidate_score = ((max_pos - max_neg) / (max_pos + max_neg + 1e-8)) * weight  # shape: [B, T, C]
         candidate_score = (wei_p @ self.value) * weight  # shape: [B, T, C, 2*top_k] @ [2*top_k] -> [B, T, C]
 
         k_dense = x.new_zeros(B, T, self.Kt)

@@ -80,7 +80,8 @@ def estimate_loss(model, tokens, doc_records, doc_starts, n_train, n_concepts, b
     out = {}
     for split in ('train', 'val'):
         totals = {
-            'total': 0.0, 'lm': 0.0, 'lm_accuracy': 0.0, 'concept': 0.0, 'concept_accuracy': 0.0,
+            'total': 0.0, 'lm': 0.0, 'lm_accuracy': 0.0, 'concept': 0.0,
+            'concept_accuracy_or': 0.0, 'concept_accuracy_per_token': 0.0,
             'rec': 0.0, 'indep': 0.0, 'known_contribution': 0.0, 'unknown_contribution': 0.0,
         }
         for _ in range(eval_iters):
@@ -146,7 +147,8 @@ def estimate_diffusion_loss(model, tokens, doc_records, doc_starts, n_train, n_c
     out = {}
     for split in ('train', 'val'):
         totals = {
-            'total': 0.0, 'lm': 0.0, 'lm_accuracy': 0.0, 'concept': 0.0, 'concept_accuracy': 0.0,
+            'total': 0.0, 'lm': 0.0, 'lm_accuracy': 0.0, 'concept': 0.0,
+            'concept_accuracy_or': 0.0, 'concept_accuracy_per_token': 0.0,
             'rec': 0.0, 'indep': 0.0, 'known_contribution': 0.0, 'unknown_contribution': 0.0,
         }
         for _ in range(eval_iters):

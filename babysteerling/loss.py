@@ -31,15 +31,20 @@ class ConceptLoss(nn.Module):
         k: [B, T, n] predicted known-concept activations (post-sigmoid).
         doc_spans: list of (batch_idx, tok_start, tok_end, concept_ids), one per document that
             overlaps this batch of windows (see data/utils.py's build_supervision()).
-        return_accuracy=True also returns the match rate between the thresholded (>0.5)
-        prediction and the label, computed in the same loop as the loss.
+        return_accuracy=True also returns two accuracies, computed in the same loop as the loss:
+        OR-aggregated (matches the loss's own semantics: does the doc-level soft-OR prediction
+        match the doc-level label) and per-token (does each individual token's own prediction
+        match that same doc-level label, without aggregating first -- a stricter, more granular
+        view, at the cost of scoring the same label once per token instead of once per document).
         """
         if not doc_spans:
             zero = torch.tensor(0.0, device=k.device)
-            return (zero, zero) if return_accuracy else zero
+            return (zero, zero, zero) if return_accuracy else zero
         n = k.shape[-1]
         total = k.new_zeros(())
-        correct = k.new_zeros(())
+        correct_or = k.new_zeros(())
+        correct_per_token = k.new_zeros(())
+        n_tokens = 0
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
             k_span = k[batch_idx, tok_start:tok_end, :]  # shape: [B, T, n] -> [doc_len, n], this doc's own tokens only
             k_chunk = 1 - torch.prod(1 - k_span, dim=0)  # shape: [doc_len, n] -> [n], soft-OR aggregation over the doc
@@ -48,14 +53,18 @@ class ConceptLoss(nn.Module):
             # clamp avoids log(0) in BCE when a prediction is fully saturated at 0 or 1
             total = total + F.binary_cross_entropy(k_chunk.clamp(1e-6, 1 - 1e-6), y, reduction='sum')
             if return_accuracy:
-                correct = correct + ((k_chunk.detach() > 0.5) == y.bool()).float().sum()
+                correct_or = correct_or + ((k_chunk.detach() > 0.5) == y.bool()).float().sum()
+                correct_per_token = correct_per_token + (
+                    (k_span.detach() > 0.5) == y.bool().unsqueeze(0)
+                ).float().sum()  # y broadcasts to every token in the doc's span
+                n_tokens += k_span.shape[0]
         loss = total / len(doc_spans)  # average per-document loss, so batch size doesn't change the scale
         if return_accuracy:
-            return loss, correct / (len(doc_spans) * n)
+            return loss, correct_or / (len(doc_spans) * n), correct_per_token / (n_tokens * n)
         return loss
 
 
-def selected_concept_diagnostics(k, known_labels, eps=1e-6):
+def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
     """Diagnostic BCE and accuracy for sparse, prototype-routed encoders like
     known_encoder_type="linear_selector". Never contributes a gradient (see
     model.use_concept_loss).
@@ -67,17 +76,46 @@ def selected_concept_diagnostics(k, known_labels, eps=1e-6):
 
     k's value axis is [-1, +1] (see nn.prototype._fixed_value_axis), rescaled to [0, 1] via
     (k+1)/2 before BCE.
+
+    doc_spans, if given, also returns an OR-aggregated accuracy: per document, per concept that
+    was selected at least once somewhere in it, "present" if any selected token's rescaled
+    probability exceeds 0.5 (a soft-OR over selected positions only, same style as ConceptLoss's
+    own aggregation) -- matches ConceptLoss's accuracy semantics instead of this function's usual
+    per-token one. A concept never selected anywhere in a document isn't scored at all (same
+    "only score what was actually selected" rule as the per-token accuracy above), rather than
+    counted as a free true negative.
     """
     with torch.no_grad():
         mask = k != 0
         if mask.sum() == 0:
             zero = torch.tensor(0.0, device=k.device)
-            return zero, zero
+            return (zero, zero, zero) if doc_spans is not None else (zero, zero)
         probs = ((k[mask] + 1) / 2).clamp(eps, 1 - eps)
         target = known_labels[mask].float()
         bce = F.binary_cross_entropy(probs, target)
         accuracy = ((probs > 0.5) == target.bool()).float().mean()
-        return bce, accuracy
+
+        if doc_spans is None:
+            return bce, accuracy
+
+        n = k.shape[-1]
+        prob_full = (k + 1) / 2  # shape: [B, T, n]; unscored (k==0) positions read 0.5, excluded below via mask
+        or_correct = k.new_zeros(())
+        n_scored = k.new_zeros(())
+        for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
+            p_span = prob_full[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
+            s_span = mask[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
+            scored_here = s_span.any(dim=0)  # shape: [n], which concepts were selected anywhere in this doc
+            if scored_here.sum() == 0:
+                continue
+            p_for_or = torch.where(s_span, p_span, torch.zeros_like(p_span))  # unselected -> 0, no effect on the product below
+            doc_prob = 1 - torch.prod(1 - p_for_or, dim=0)  # shape: [n], soft-OR over selected positions only
+            y = k.new_zeros(n)
+            y[concept_ids] = 1.0
+            or_correct = or_correct + ((doc_prob > 0.5) == y.bool())[scored_here].float().sum()
+            n_scored = n_scored + scored_here.sum()
+        or_accuracy = or_correct / n_scored.clamp(min=1)
+        return bce, accuracy, or_accuracy
 
 
 class ReconstructionLoss(nn.Module):
@@ -137,8 +175,11 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
     intermediates: the dict returned by ConceptBottleneck.forward().
     known_labels: [B, T, n] dense multi-hot ground truth, only used when use_concept_loss=False.
     use_concept_loss=False (see model.use_concept_loss) drops ConceptLoss from total_loss and
-    reports selected_concept_diagnostics instead for components['concept'/'concept_accuracy'],
-    purely for logging (see that function for why).
+    reports selected_concept_diagnostics instead for components['concept'/'concept_accuracy_or'/
+    'concept_accuracy_per_token'], purely for logging (see that function for why). Both
+    accuracies are always reported regardless of use_concept_loss, so the two encoder families
+    stay comparable on the same terms instead of each only ever exposing the one its own loss
+    happens to aggregate by.
     Returns (total_loss, components), a plain dict of floats for logging each term.
     """
     B, T, C = logits.shape
@@ -154,9 +195,13 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
         lm_accuracy = (pred_ids[mask] == targets[mask]).float().mean()
 
     if use_concept_loss:
-        concept_loss, concept_accuracy = _concept_loss_fn(intermediates['k'], doc_spans, return_accuracy=True)
+        concept_loss, concept_accuracy_or, concept_accuracy_per_token = _concept_loss_fn(
+            intermediates['k'], doc_spans, return_accuracy=True,
+        )
     else:
-        concept_loss, concept_accuracy = selected_concept_diagnostics(intermediates['k'], known_labels)
+        concept_loss, concept_accuracy_per_token, concept_accuracy_or = selected_concept_diagnostics(
+            intermediates['k'], known_labels, doc_spans=doc_spans,
+        )
     rec_loss = _rec_loss_fn(intermediates['u_hat'], intermediates['u_hat_gt'], mask=mask)
     indep_loss = _indep_loss_fn(intermediates['k_hat'], intermediates['u_hat'])
 
@@ -168,7 +213,8 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
         'lm': lm_loss.item(),
         'lm_accuracy': lm_accuracy.item(),
         'concept': concept_loss.item(),
-        'concept_accuracy': concept_accuracy.item(),
+        'concept_accuracy_or': concept_accuracy_or.item(),
+        'concept_accuracy_per_token': concept_accuracy_per_token.item(),
         'rec': rec_loss.item(),
         'indep': indep_loss.item(),
     }

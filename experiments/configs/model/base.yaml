@@ -1,4 +1,4 @@
-# Default architecture: matches 5_steerlingv2/gpt_steerling.py's current hyperparameters.
+# Default architecture: matches 3_steerling/gpt_steerling.py's hyperparameters.
 n_embed: 128
 num_heads: 4
 num_kv_heads: 2
@@ -6,7 +6,7 @@ n_layers: 4
 dropout: 0.2
 
 # backbone: causal (next-token prediction, is_causal=True attention) or diffusion (masked
-# diffusion objective, block-causal attention -- see configs/model/diffusion.yaml)
+# diffusion objective, block-causal attention; see configs/model/diffusion.yaml)
 backbone_type: causal
 diff_block_len: null  # required when backbone_type: diffusion (block_size must be divisible by it)
 
@@ -22,3 +22,28 @@ head:
   type: linear      # linear | mlp
   tie_weights: true  # tie head weights to the token embedding (linear head only)
   mlp_hidden: null   # hidden width for the mlp head; defaults to n_embed if null
+
+# known-concept encoder: "dense" (default, a small MLP over the known library; see
+# babysteerling.nn.encoder.SparseEmbeddingToConcept), or "linear_selector" / "product_key" /
+# "prototype_attention" (babysteerling.nn.prototype) for concept libraries too large for a dense
+# projection (Kt in the 100k-1M range); see configs/model/{linear_selector,product_key,
+# prototype_attention}.yaml. All three need the dataset built with atlas.enable_prototypes=true
+# (concept_prototypes.json). linear_selector and product_key are interchangeable Selectors
+# (which candidates to score), both paired with the same PrototypePredictor (how candidates get
+# scored); swapping between them only changes the O(Kt) vs O(sqrt(Kt)) selection cost.
+known_encoder_type: dense
+# whether ConceptLoss (loss.py's BCE against intermediates['k']) contributes to training at all.
+# True everywhere except linear_selector (see its own config): torch.topk's backward gives 0
+# gradient to anything not in the selected top-k, so for that encoder ConceptLoss can only ever
+# nudge already-selected candidates, never pull in a correct-but-unselected one.
+use_concept_loss: true
+candidates_per_token: 25  # linear_selector only: how many concepts to score per token (its only sparsity mechanism)
+topk_axis: 5          # product_key only: candidates per token = topk_axis**2
+chunk_size: 4096       # prototype_attention only: concepts processed per chunk
+known_key_dim: null    # shared query/key projection width for any of the three; defaults to min(n_embed, 32) if null
+use_checkpoint: true   # prototype_attention only: gradient-checkpoint each chunk to bound backward memory
+# linear_selector/product_key/prototype_attention only: cap on prototype text length in tokens.
+# The per-token Selectors gather prototype data per (token position, candidate), so one long,
+# uncapped prototype anywhere in the library multiplies into every gather, not just its own row.
+# Keep this well above what a "short excerpt" prompt should ever produce.
+max_prototype_tokens: 32

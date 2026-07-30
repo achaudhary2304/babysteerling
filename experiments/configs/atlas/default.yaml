@@ -1,6 +1,5 @@
-# Atlas pipeline hyperparameters -- dataset-agnostic (which dataset to build from is a separate
-# concern, see configs/corpus/). These control how the pipeline processes whatever corpus is
-# configured: how much to sample, which models to use, and clustering/dedup thresholds.
+# Atlas pipeline hyperparameters, dataset-agnostic (which dataset to build from is configs/corpus/).
+# These control how much to sample, which models to use, and clustering/dedup thresholds.
 output_dir: ./data
 
 # Stage 1: tagging
@@ -8,9 +7,8 @@ num_documents: 5000
 tagging_model: Qwen/Qwen2.5-1.5B-Instruct
 tagging_batch_size: 16
 tagging_max_new_tokens: 150
-# {document} placeholder is required; tune the framing to match your corpus's domain (this
-# default assumes short children's stories, e.g. TinyStories) -- if you swap in a differently
-# themed corpus config, you'll likely want a matching atlas config with a different prompt too
+# {document} placeholder is required. This default assumes short children's stories (e.g.
+# TinyStories); use a different atlas config with a matching prompt for a different corpus.
 tag_prompt_template: |-
   Read the short children's story below and list 5 to 10 free-form tags describing it: its characters, setting, theme or moral, plot events, and tone. Respond with ONLY a JSON array of short lowercase tag strings, no other text.
 
@@ -40,8 +38,23 @@ num_scaleup_documents: 20000
 similarity_floor: 0.3
 
 # Post-processing: per-concept lifted tokens (Section 4.4's lift metric), the token-level
-# attribution signal babysteerling.steering uses -- see babysteerling/data/atlas/lifted_words.py
+# attribution signal babysteerling.steering uses. See babysteerling/data/babyatlas/lifted_words.py
 lifted_top_k: 50
 lifted_min_support: 5
+
+# Post-processing (extra LLM generation cost when enabled): synthetic positive/negative/
+# unrelated text prototypes per concept, see babysteerling/data/babyatlas/concept_prototypes.py
+enable_prototypes: true
+n_proto: 15
+prototype_batch_size: 16
+prototype_max_new_tokens: 300
+# {n}, {label}, {description} placeholders required in every template
+prototype_prompt_templates:
+  positive: |-
+    Write {n} short (1-3 sentence) excerpts, in the style of a children's story, that each clearly and strongly express the concept "{label}" ({description}). Respond with ONLY a JSON array of strings, no other text.
+  negative: |-
+    Write {n} short (1-3 sentence) excerpts, in the style of a children's story, each set in a similar kind of situation to the concept "{label}" ({description}), but where that concept clearly does NOT happen -- show its opposite or absence, not just an unrelated topic. Respond with ONLY a JSON array of strings, no other text.
+  unrelated: |-
+    Write {n} short (1-3 sentence) excerpts, in the style of a children's story, each about an ordinary everyday topic (e.g. baking cookies, a rainy afternoon, counting stars, cleaning a room) with no connection at all to the concept "{label}" ({description}). Respond with ONLY a JSON array of strings, no other text.
 
 seed: 1337

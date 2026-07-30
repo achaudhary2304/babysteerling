@@ -13,16 +13,15 @@ from tokenizers import Tokenizer
 
 def tokenize_dataset(chunk_concepts_path, tokenizer_path, tokens_output_path, concepts_output_path,
                       boundary_token="<|endoftext|>"):
-    """Tokenize each concept-annotated chunk (from assign_concepts()) and record its token span
-    in the concatenated stream, so per-document concept labels can be looked up later without
-    re-parsing text.
+    """Tokenizes each concept-annotated chunk (from assign_concepts()) and records its token
+    span in the concatenated stream, so per-document concept labels can be looked up later
+    without re-parsing text.
 
-    `boundary_token` must be the same token prepare.train_tokenizer() was given -- it's appended
-    after every chunk to mark its boundary. It's independent of whatever `document_delimiter`
-    each source's raw text used (sources can differ there, see experiments/configs/corpus/);
-    this is a single artificial marker the pipeline itself inserts, not a property of the corpus.
+    `boundary_token` must be the same token prepare.train_tokenizer() was given: it's appended
+    after every chunk to mark its boundary, independent of whatever `document_delimiter` each
+    source's raw text used.
 
-    Idempotent: skips entirely if both output paths already exist.
+    Idempotent: skips if both output paths already exist.
     """
     if os.path.exists(tokens_output_path) and os.path.exists(concepts_output_path):
         print(f"Found existing {tokens_output_path} and {concepts_output_path}, skipping tokenization.")

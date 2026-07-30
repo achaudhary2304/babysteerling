@@ -14,18 +14,16 @@ def assign_concepts(tags_path, concepts_path, output_path, input_path=None,
                      document_delimiter="<|endoftext|>", enable_scale_up=False,
                      num_scaleup_documents=20000, scaleup_seed=7, similarity_floor=0.3,
                      embed_model_name="all-MiniLM-L6-v2", device=None):
-    """Map each tagged chunk's raw tags to final concept IDs via direct lookup (the tag ->
-    concept mapping built during build_concepts()), writing one JSON line per chunk to
+    """Maps each tagged chunk's raw tags to final concept IDs via direct lookup (the tag ->
+    concept mapping built by build_concepts()), writing one JSON line per chunk to
     `output_path`.
 
-    If `enable_scale_up=True`, also embeds additional *untagged* documents from `input_path`
-    (split on `document_delimiter`, same as tag_chunks()) with a sentence-transformer and
-    assigns each to its nearest concept centroid -- a cheap way to extend concept coverage
-    beyond the LLM-tagged sample without more LLM calls, at the cost of noisier,
-    single-concept-only labels (see the "source" field: "llm_tag" vs "centroid_nn" marks which
-    path produced each row).
+    If `enable_scale_up=True`, also embeds additional untagged documents from `input_path` and
+    assigns each to its nearest concept centroid: a cheap way to extend coverage beyond the
+    LLM-tagged sample without more LLM calls, at the cost of noisier, single-concept labels.
+    The "source" field marks which path produced each row ("llm_tag" vs "centroid_nn").
 
-    Idempotent: skips entirely if `output_path` already exists.
+    Idempotent: skips if `output_path` already exists.
     """
     if os.path.exists(output_path):
         print(f"Found existing {output_path}, skipping assignment.")

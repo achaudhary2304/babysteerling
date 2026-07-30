@@ -6,13 +6,11 @@ from torch.nn import functional as F
 
 
 class MultiHeadAttention(nn.Module):
-    """Grouped-query self-attention (num_kv_heads < num_heads shares key/value heads across
-    multiple query heads, trading a little quality for a smaller KV cache).
+    """Grouped-query self-attention: num_kv_heads < num_heads shares key/value heads across
+    several query heads, for a smaller KV cache at a small quality cost.
 
-    Causal by default. Pass an explicit `attn_mask` (e.g. the block-causal mask built by
-    babysteerling.diffusion for the masked-diffusion backbone) to override that -- this is the
-    only change needed to this class to support a non-causal attention pattern; it doesn't need
-    to know anything else about why the mask looks the way it does.
+    Causal by default. Pass attn_mask (e.g. babysteerling.diffusion's block-causal mask) to use
+    a different pattern instead. This class doesn't need to know why the mask looks that way.
     """
 
     def __init__(self, num_heads, head_size, n_embed, dropout, num_kv_heads=None):
@@ -43,17 +41,16 @@ class MultiHeadAttention(nn.Module):
         v = v.repeat_interleave(repeat_factor, dim=1)
 
         if attn_mask is None:
-            # fused causal attention kernel; is_causal=True masks each position to only see
-            # itself and earlier tokens. Kept as the default path so the common (causal) case
-            # doesn't pay for the general masked kernel below.
+            # is_causal=True: fused kernel, each position only sees itself and earlier ones.
+            # Default path, so the common case skips the general masked kernel below.
             out = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.dropout_p if self.training else 0.0,
                 is_causal=True,
             )  # shape: [B, num_heads, T, head_size]
         else:
-            # general masked path (e.g. block-causal: bidirectional within a block, causal
-            # across blocks) -- an arbitrary boolean mask can't use the fused is_causal kernel
+            # a custom mask (e.g. block-causal) can't use the fused is_causal kernel, so it
+            # goes through the general masked path instead
             out = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attn_mask,
@@ -104,10 +101,10 @@ class Block(nn.Module):
 
 
 class TransformerModel(nn.Module):
-    """Backbone only: token/position embeddings through the transformer stack.
+    """Backbone only: token and position embeddings through the transformer stack.
 
-    Stops before any LM head on purpose -- in this architecture the head applies to the
-    *bottlenecked* hidden state (see ConceptBottleneck below), not this raw backbone output.
+    Stops before any LM head, since here the head applies to the bottlenecked hidden state
+    (see ConceptBottleneck), not this raw output.
     """
 
     def __init__(self, vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads):
@@ -121,8 +118,7 @@ class TransformerModel(nn.Module):
         self.ln_f = nn.LayerNorm(n_embed)
 
         self.apply(self._init_weights)
-        # scale down residual-stream-writing projections so the residual stream doesn't blow up
-        # in variance as depth increases (standard GPT-2-style init trick)
+        # shrink residual-writing projections so variance doesn't grow with depth (GPT-2-style init)
         for name, p in self.named_parameters():
             if name.endswith('proj.weight') or name.endswith('w3.weight'):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))

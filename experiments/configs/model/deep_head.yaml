@@ -1,4 +1,4 @@
-# "deephead" ablation (was previously a hand-copied file, 5_steerlingv2/gpt_steerling_deephead.py):
+# "deephead" ablation (was previously a hand-copied file, 3_steerling/gpt_steerling_deephead.py):
 # swap the linear tied head for a deeper, untied MLP head. Everything else inherits from base.
 defaults:
   - base

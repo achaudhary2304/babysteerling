@@ -71,13 +71,13 @@ def build_concepts(tags_path, output_path, embed_model_name="all-MiniLM-L6-v2",
                     tags_per_label_prompt=15, dedup_threshold=0.9, batch_size=16,
                     max_new_tokens=100, seed=1337, device=None,
                     label_prompt_template=DEFAULT_LABEL_PROMPT_TEMPLATE):
-    """Cluster the raw tags written by tag_chunks() into a canonical, human-labeled,
-    deduplicated concept library, written as JSON to `output_path`.
+    """Clusters the raw tags from tag_chunks() into a canonical, human-labeled, deduplicated
+    concept library, written as JSON to `output_path`.
 
-    `label_prompt_template` must contain a `{tags}` placeholder; override it (via config) to
-    match the corpus's domain if the default "children's stories" framing doesn't fit.
+    `label_prompt_template` must contain a `{tags}` placeholder; override it for a corpus that
+    doesn't fit the default "children's stories" framing.
 
-    Idempotent: skips entirely if `output_path` already exists.
+    Idempotent: skips if `output_path` already exists.
     """
     if os.path.exists(output_path):
         print(f"Found existing {output_path}, skipping concept building.")

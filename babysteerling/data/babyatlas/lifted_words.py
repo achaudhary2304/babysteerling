@@ -1,10 +1,9 @@
-"""Compute per-concept "lifted" tokens: vocabulary tokens most statistically associated with a
-concept, following Section 4.4's lift metric: lift(w, c) = P(w|c) / P(w).
+"""Computes per-concept "lifted" tokens: vocabulary tokens most associated with a concept,
+using Section 4.4's lift metric, lift(w, c) = P(w|c) / P(w).
 
-Used by babysteerling.steering as the token-level attribution signal for steering (a token in a
-document already tagged with concept c counts as "attributed" to c if it's one of c's lifted
-tokens) -- derived entirely from data the pipeline already produces (the final tokenized dataset
-+ its per-document concept labels), rather than a new LLM-tagging stage.
+Used by babysteerling.steering as the token-level attribution signal: a token in a document
+already tagged with concept c counts as "attributed" to c if it's one of c's lifted tokens.
+Built entirely from data the pipeline already produces, no new LLM-tagging stage needed.
 """
 import json
 import os
@@ -14,18 +13,17 @@ import torch
 
 
 def compute_lifted_tokens(tokens_path, doc_records_path, output_path=None, top_k=50, min_support=5):
-    """For each concept, rank vocabulary tokens by lift = P(token | concept) / P(token), using
-    token frequency within documents tagged with that concept vs. corpus-wide token frequency.
+    """Ranks vocabulary tokens per concept by lift = P(token | concept) / P(token): token
+    frequency within that concept's documents vs. corpus-wide frequency.
 
-    tokens_path / doc_records_path: the same steerling_tokens.pt / steerling_concepts.pt written
-    by tokenize_dataset() -- reused directly, no re-tokenization needed.
+    tokens_path/doc_records_path: the same steerling_tokens.pt/steerling_concepts.pt written by
+    tokenize_dataset(), reused directly.
 
-    Returns {concept_id: [token_id, ...]} (top_k tokens per concept, each required to appear at
-    least min_support times within that concept's documents, to keep idiosyncratic rare tokens
-    from dominating the ranking with a spuriously high lift score).
+    Returns {concept_id: [token_id, ...]}, top_k tokens per concept. Each token must appear at
+    least min_support times within that concept's documents, so rare tokens can't dominate with
+    a spuriously high lift score.
 
-    Idempotent: if output_path is given and already exists, loads and returns it instead of
-    recomputing.
+    Idempotent: if output_path exists, loads and returns it instead of recomputing.
     """
     if output_path and os.path.exists(output_path):
         print(f"Found existing {output_path}, skipping lifted-token computation.")

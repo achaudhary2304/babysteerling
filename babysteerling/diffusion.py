@@ -20,20 +20,26 @@ def build_block_causal_mask(block_size, diff_block_len, device=None):
     return mask
 
 
-def sample_noise_levels(num_blocks, device):
-    """Per-block noise level t_b ~ U(0,1) (paper Section 5.4.2). The paper's final model uses a
-    moving Gaussian curriculum instead; swap this function for that later without touching
-    corrupt()."""
-    return torch.rand(num_blocks, device=device)
+def sample_noise_levels(num_blocks, device, t_min=0.1, t_max=0.9):
+    """Per-block noise level t_b ~ U(t_min, t_max) (paper Section 5.4.2). The paper's final model
+    uses a moving Gaussian curriculum instead; swap this function for that later without touching
+    corrupt().
+
+    Bounded rather than U(0,1): t near 0 masks nothing, so the block carries no training signal,
+    and t near 1 leaves no context to predict from. The bound also caps the 1/p_mask importance
+    weight in loss.compute_losses at 1/t_min.
+    """
+    return torch.rand(num_blocks, device=device) * (t_max - t_min) + t_min
 
 
 def corrupt(x0, mask_token_id, diff_block_len):
     """Masks tokens independently, using a per-block noise level.
 
     x0: LongTensor [B, T], T must be divisible by diff_block_len.
-    Returns (x_t, mask): the corrupted sequence and a boolean mask of which positions were
-    replaced. loss.compute_losses(..., mask=mask) uses this mask to only score positions that
-    actually had something to predict.
+    Returns (x_t, mask, p_mask): the corrupted sequence, a boolean mask of which positions were
+    replaced, and each position's masking probability. loss.compute_losses(..., mask=mask,
+    mask_weights=p_mask) uses the mask to only score positions that actually had something to
+    predict, and p_mask to weight them.
     """
     B, T = x0.shape
     assert T % diff_block_len == 0, "sequence length must be divisible by the diffusion block length"
@@ -45,7 +51,7 @@ def corrupt(x0, mask_token_id, diff_block_len):
     mask = torch.rand(B, T, device=x0.device) < t_per_token  # shape: [B, T], True where this token gets masked
     x_t = x0.clone()
     x_t[mask] = mask_token_id
-    return x_t, mask
+    return x_t, mask, t_per_token
 
 
 def ensure_mask_token(tokenizer, mask_token="[MASK]"):

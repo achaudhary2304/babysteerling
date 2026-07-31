@@ -111,11 +111,19 @@ class ConceptBottleneck(nn.Module):
             k_hat_gt = self.known.ground_truth_embedding(known_labels)  # shape: [B, T, d]
             u_hat_gt = h - k_hat_gt  # shape: [B, T, d], target for the unknown head's reconstruction loss
 
-        epsilon = self.residual(h, k_hat, u_hat)  # shape: [B, T, d]
-        h_bar = k_hat + u_hat + epsilon  # shape: [B, T, d], exactly reconstructs h in expectation
+        # teacher forcing: feed the LM head the ground-truth concept embedding while training, so it
+        # isn't learning from an unconverged concept head. Gated on self.training, since
+        # build_supervision provides known_labels at eval too and without the gate validation would
+        # be handed the correct concepts, making val/lm measure an easier task than the
+        # no-bottleneck baseline does.
+        k_hat_used = k_hat_gt if (self.training and k_hat_gt is not None) else k_hat
+
+        epsilon = self.residual(h, k_hat_used, u_hat)  # shape: [B, T, d]
+        h_bar = k_hat_used + u_hat + epsilon  # shape: [B, T, d], exactly reconstructs h in expectation
 
         intermediates = {
-            'k': k, 'u': u, 'k_hat': k_hat, 'u_hat': u_hat,
+            'k': k, 'u': u, 'k_hat': k_hat, 'u_hat': u_hat,  # predicted: what the losses score
+            'k_hat_used': k_hat_used,  # what actually formed h_bar (ground truth while training)
             'k_hat_gt': k_hat_gt, 'u_hat_gt': u_hat_gt, 'epsilon': epsilon,
         }
         return h_bar, intermediates

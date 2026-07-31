@@ -24,7 +24,18 @@ class ConceptLoss(nn.Module):
     probability with a soft-OR (1 minus the product of "concept absent" over every token), then
     compare that to the 0/1 label. The loss is satisfied as soon as one token confidently
     predicts the concept.
+
+    The aggregation has to happen in LOG space. Computed directly as `1 - prod(1 - k)`, the product
+    underflows for any realistic span: at activations of 0.5 over a 220-token document it reads 1.0
+    to float32 precision, so an absent concept's term pins at the clamp and becomes a constant
+    -log(1e-6) = 13.8 with no gradient at all. Summing log(1 - k) instead keeps every token's
+    contribution alive however saturated the aggregate is.
+
+    Reduced with mean rather than sum over concepts, so the term doesn't scale with the size of the
+    concept library.
     """
+
+    P_MAX = 1 - 1e-6  # ceiling on activations, so log1p(-p) can't hit log(0)
 
     def forward(self, k, doc_spans, return_accuracy=False):
         """
@@ -47,13 +58,20 @@ class ConceptLoss(nn.Module):
         n_tokens = 0
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
             k_span = k[batch_idx, tok_start:tok_end, :]  # shape: [B, T, n] -> [doc_len, n], this doc's own tokens only
-            k_chunk = 1 - torch.prod(1 - k_span, dim=0)  # shape: [doc_len, n] -> [n], soft-OR aggregation over the doc
+            # log P(concept absent from the whole span) = sum over tokens of log(1 - k). Deliberately
+            # not floored: this term is used directly below, and a floor would cap it at a constant
+            # and kill the gradient for exactly the long spans that need it.
+            log_p_none = torch.log1p(-k_span.clamp(max=self.P_MAX)).sum(dim=0)  # shape: [doc_len, n] -> [n]
+            # p_none underflowing to 0 on a saturated span is correct: log_p_any then reads 0, i.e.
+            # "certainly present", and there is nothing left to improve.
+            log_p_any = torch.log1p(-log_p_none.exp())  # shape: [n], log of the soft-OR
             y = k.new_zeros(n)  # shape: [n], multi-hot ground-truth label for this document
             y[concept_ids] = 1.0
-            # clamp avoids log(0) in BCE when a prediction is fully saturated at 0 or 1
-            total = total + F.binary_cross_entropy(k_chunk.clamp(1e-6, 1 - 1e-6), y, reduction='sum')
+            # BCE written out, so the absent term is -log_p_none directly (a sum of per-token
+            # penalties) rather than -log(1 - soft_or), which saturates
+            total = total + -(y * log_p_any + (1 - y) * log_p_none).mean()
             if return_accuracy:
-                correct_or = correct_or + ((k_chunk.detach() > 0.5) == y.bool()).float().sum()
+                correct_or = correct_or + ((log_p_any.detach().exp() > 0.5) == y.bool()).float().sum()
                 correct_per_token = correct_per_token + (
                     (k_span.detach() > 0.5) == y.bool().unsqueeze(0)
                 ).float().sum()  # y broadcasts to every token in the doc's span

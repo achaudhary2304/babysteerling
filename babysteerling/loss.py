@@ -194,6 +194,12 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
         lm_loss = F.cross_entropy(logits[mask], targets[mask])  # shape: [B, T, vocab] -> [n_masked, vocab] vs [n_masked]
         lm_accuracy = (pred_ids[mask] == targets[mask]).float().mean()
 
+    if not intermediates:  # no bottleneck: cross-entropy is the whole loss
+        components = {'total': lm_loss.item(), 'lm': lm_loss.item(), 'lm_accuracy': lm_accuracy.item()}
+        components.update(concept=0.0, concept_accuracy_or=0.0, concept_accuracy_per_token=0.0,
+                          rec=0.0, indep=0.0)
+        return lm_loss, components
+
     if use_concept_loss:
         concept_loss, concept_accuracy_or, concept_accuracy_per_token = _concept_loss_fn(
             intermediates['k'], doc_spans, return_accuracy=True,

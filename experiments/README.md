@@ -76,7 +76,7 @@ python train.py
 ```
 
 This uses the defaults in `configs/config.yaml`, which pull in `configs/data/tinystories.yaml`,
-`configs/model/base.yaml`, `configs/training/default.yaml`, `configs/wandb/default.yaml`,
+`configs/model/steerling_gpt.yaml`, `configs/training/default.yaml`, `configs/wandb/default.yaml`,
 `configs/atlas/default.yaml`, and `configs/corpus/tinystories.yaml`.
 
 Override any hyperparameter from the command line, no file editing needed:
@@ -90,11 +90,23 @@ Each run prints train/val loss (split into `lm`, `concept`, `rec`, `indep`) ever
 `training.eval_interval` steps, saves a checkpoint to `./checkpoints/<wandb-run-name>.pt`, and
 logs a short sample generation to W&B at the end.
 
-**Backbone**: `model.backbone_type` picks `causal` (default, next-token prediction) or
-`diffusion` (masked-diffusion objective with block-causal attention, matching
-`3_steerling/steerling.py`): `python train.py model=diffusion`. The `[MASK]` token the diffusion
-objective needs is added to the tokenizer automatically. Nothing else needs to change to switch
-backbones.
+**Which model**: two independent choices -- the backbone (`model.backbone_type`: `causal`
+next-token prediction, or `diffusion` masked-diffusion with block-causal attention, matching
+`3_steerling/steerling.py`) and whether the concept bottleneck is there at all
+(`model.interpretable`). One config group per combination:
+
+| | with bottleneck | no bottleneck |
+|---|---|---|
+| causal | `model=steerling_gpt` (default) | `model=gpt` |
+| diffusion | `model=steerling_diffusion` | `model=diffusion` |
+
+The two no-bottleneck variants are plain language models sharing the same backbone, head and
+training loop, so the difference in `val/lm` against their bottlenecked counterpart is what the
+bottleneck costs. They report `concept`/`rec`/`indep` as `0.0` so the W&B panels line up. Pair them
+with `steering.enabled=false`, since steering needs the bottleneck's concept embeddings.
+
+The `[MASK]` token the diffusion objective needs is added to the tokenizer automatically. Nothing
+else needs to change to switch backbones.
 
 ## Adjusting configs / adding a new variant
 
@@ -121,7 +133,7 @@ Hydra's multirun mode (`-m`) runs every combination of the listed values as a se
 the `joblib` launcher to run them in parallel instead of one after another:
 
 ```bash
-python train.py -m model=base,deep_head training.lr=1e-3,3e-4 \
+python train.py -m model=steerling_gpt,deep_head training.lr=1e-3,3e-4 \
     hydra/launcher=joblib hydra.launcher.n_jobs=4
 ```
 
@@ -130,7 +142,7 @@ This launches 4 runs (2 models x 2 learning rates), up to 4 at once. Each gets i
 To group a sweep's runs together for comparison, add a shared group:
 
 ```bash
-python train.py -m model=base,deep_head wandb.group=head_ablation hydra/launcher=joblib
+python train.py -m model=steerling_gpt,deep_head wandb.group=head_ablation hydra/launcher=joblib
 ```
 
 The same `-m` mechanism works for `build_dataset.py`, e.g. to build several differently

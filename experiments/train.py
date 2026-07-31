@@ -12,8 +12,8 @@ on which one is in use.
 
 Run a single experiment:      python train.py
 Override any hyperparameter:  python train.py training.lr=1e-3 model=deep_head
-Use the diffusion backbone:   python train.py model=diffusion
-Run a parallel sweep:         python train.py -m model=base,deep_head training.lr=1e-3,3e-4
+Use the diffusion backbone:   python train.py model=steerling_diffusion
+Run a parallel sweep:         python train.py -m model=steerling_gpt,deep_head training.lr=1e-3,3e-4
 (see README.md for the full explanation of config overrides and multirun)
 """
 import hashlib
@@ -172,6 +172,7 @@ def main(cfg: DictConfig):
         head_type=cfg.model.head.type, tie_weights=cfg.model.head.tie_weights,
         head_mlp_hidden=cfg.model.head.mlp_hidden,
         backbone_type=cfg.model.backbone_type, diff_block_len=cfg.model.diff_block_len,
+        interpretable=cfg.model.interpretable,
         known_encoder_type=cfg.model.known_encoder_type, proto_token_ids=proto_token_ids,
         topk_axis=cfg.model.topk_axis, chunk_size=cfg.model.chunk_size,
         known_key_dim=cfg.model.known_key_dim, use_checkpoint=cfg.model.use_checkpoint,
@@ -321,8 +322,8 @@ def main(cfg: DictConfig):
     # sample a short generation and log it to W&B as text, so qualitative output is visible
     # next to the loss curves
     if is_diffusion:
-        sample_ids = diffusion.generate(
-            model, mask_token_id, seq_len=cfg.data.block_size, vocab_size=vocab_size,
+        sample_ids = model.generate(
+            mask_token_id, seq_len=cfg.data.block_size, vocab_size=vocab_size,
             gen_steps=cfg.training.gen_steps, temperature=cfg.training.gen_temperature,
             top_k=cfg.training.gen_top_k,
         )

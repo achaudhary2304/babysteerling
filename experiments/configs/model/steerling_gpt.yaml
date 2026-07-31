@@ -1,0 +1,6 @@
+# Causal backbone with the concept bottleneck: the default model.
+defaults:
+  - base
+  - _self_
+
+wandb_name: steerling_gpt

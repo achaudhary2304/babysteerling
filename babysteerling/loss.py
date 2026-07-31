@@ -195,10 +195,12 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
         if mask_weights is None:
             lm_loss = ce.mean()
         else:
-            # the masked-diffusion ELBO weights each masked position by 1/p_mask and averages over
-            # every position, not just the masked ones. Without it, lightly-masked blocks (small t,
-            # few positions kept) count for less than they should and the loss is biased.
-            lm_loss = (ce / mask_weights[mask]).sum() / mask.numel()
+            # the masked-diffusion ELBO weights each masked position by 1/p_mask, so that blocks
+            # with a low noise level aren't under-counted. Normalizing by the weight sum rather
+            # than the token count keeps it a weighted mean: the large weights a small t produces
+            # then appear on both sides and cancel, instead of dominating the gradient.
+            w = 1.0 / mask_weights[mask]  # shape: [n_masked]
+            lm_loss = (ce * w).sum() / w.sum()
         lm_accuracy = (pred_ids[mask] == targets[mask]).float().mean()
 
     if not intermediates:  # no bottleneck: cross-entropy is the whole loss

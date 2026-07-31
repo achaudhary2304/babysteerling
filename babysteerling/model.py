@@ -6,7 +6,7 @@ Language Models" (see NOTICE), at a scale that trains in minutes on a laptop.
 The concept bottleneck splits the backbone's hidden state into three parts that add back up to
 it, before the final projection to vocabulary logits:
 
-    h_bar = k_hat (known concepts) + u_hat (unknown concepts) + epsilon (residual)
+    h_bar = k (known concepts) + u (unknown concepts) + epsilon (residual)
 
 Idea: instead of letting the model use its hidden state however it wants, force part of it
 through a small set of human-labeled "known" concepts (see babysteerling.data.atlas for how the

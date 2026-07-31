@@ -28,9 +28,9 @@ def concept_contribution(head, intermediates, targets, mask=None):
     """
     if not intermediates:
         return 0.0, 0.0
-    # decomposes on k_hat_used, since that's what formed h_bar; using k_hat would stop the
+    # decomposes on k_lm, since that's what formed h_bar; using k would stop the
     # attribution summing to the logits the model actually produced
-    k_logits, u_logits, eps_logits = head.decompose(intermediates['k_hat_used'], intermediates['u_hat'], intermediates['epsilon'])
+    k_logits, u_logits, eps_logits = head.decompose(intermediates['k_lm'], intermediates['u'], intermediates['epsilon'])
     k_term = k_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()    # shape: [B,T,vocab] -> [B,T]
     u_term = u_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()
     eps_term = eps_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()

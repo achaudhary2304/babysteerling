@@ -25,10 +25,10 @@ class ConceptLoss(nn.Module):
     compare that to the 0/1 label. The loss is satisfied as soon as one token confidently
     predicts the concept.
 
-    The aggregation has to happen in LOG space. Computed directly as `1 - prod(1 - k)`, the product
+    The aggregation has to happen in LOG space. Computed directly as `1 - prod(1 - alpha_k)`, the product
     underflows for any realistic span: at activations of 0.5 over a 220-token document it reads 1.0
     to float32 precision, so an absent concept's term pins at the clamp and becomes a constant
-    -log(1e-6) = 13.8 with no gradient at all. Summing log(1 - k) instead keeps every token's
+    -log(1e-6) = 13.8 with no gradient at all. Summing log(1 - alpha_k) instead keeps every token's
     contribution alive however saturated the aggregate is.
 
     Reduced with mean rather than sum over concepts, so the term doesn't scale with the size of the
@@ -37,9 +37,9 @@ class ConceptLoss(nn.Module):
 
     P_MAX = 1 - 1e-6  # ceiling on activations, so log1p(-p) can't hit log(0)
 
-    def forward(self, k, doc_spans, return_accuracy=False):
+    def forward(self, alpha_k, doc_spans, return_accuracy=False):
         """
-        k: [B, T, n] predicted known-concept activations (post-sigmoid).
+        alpha_k: [B, T, n] predicted known-concept activations (post-sigmoid).
         doc_spans: list of (batch_idx, tok_start, tok_end, concept_ids), one per document that
             overlaps this batch of windows (see data/utils.py's build_supervision()).
         return_accuracy=True also returns two accuracies, computed in the same loop as the loss:
@@ -49,23 +49,23 @@ class ConceptLoss(nn.Module):
         view, at the cost of scoring the same label once per token instead of once per document).
         """
         if not doc_spans:
-            zero = torch.tensor(0.0, device=k.device)
+            zero = torch.tensor(0.0, device=alpha_k.device)
             return (zero, zero, zero) if return_accuracy else zero
-        n = k.shape[-1]
-        total = k.new_zeros(())
-        correct_or = k.new_zeros(())
-        correct_per_token = k.new_zeros(())
+        n = alpha_k.shape[-1]
+        total = alpha_k.new_zeros(())
+        correct_or = alpha_k.new_zeros(())
+        correct_per_token = alpha_k.new_zeros(())
         n_tokens = 0
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
-            k_span = k[batch_idx, tok_start:tok_end, :]  # shape: [B, T, n] -> [doc_len, n], this doc's own tokens only
-            # log P(concept absent from the whole span) = sum over tokens of log(1 - k). Deliberately
+            alpha_span = alpha_k[batch_idx, tok_start:tok_end, :]  # shape: [B, T, n] -> [doc_len, n], this doc's own tokens only
+            # log P(concept absent from the whole span) = sum over tokens of log(1 - alpha_k). Deliberately
             # not floored: this term is used directly below, and a floor would cap it at a constant
             # and kill the gradient for exactly the long spans that need it.
-            log_p_none = torch.log1p(-k_span.clamp(max=self.P_MAX)).sum(dim=0)  # shape: [doc_len, n] -> [n]
+            log_p_none = torch.log1p(-alpha_span.clamp(max=self.P_MAX)).sum(dim=0)  # shape: [doc_len, n] -> [n]
             # p_none underflowing to 0 on a saturated span is correct: log_p_any then reads 0, i.e.
             # "certainly present", and there is nothing left to improve.
             log_p_any = torch.log1p(-log_p_none.exp())  # shape: [n], log of the soft-OR
-            y = k.new_zeros(n)  # shape: [n], multi-hot ground-truth label for this document
+            y = alpha_k.new_zeros(n)  # shape: [n], multi-hot ground-truth label for this document
             y[concept_ids] = 1.0
             # BCE written out, so the absent term is -log_p_none directly (a sum of per-token
             # penalties) rather than -log(1 - soft_or), which saturates
@@ -73,27 +73,27 @@ class ConceptLoss(nn.Module):
             if return_accuracy:
                 correct_or = correct_or + ((log_p_any.detach().exp() > 0.5) == y.bool()).float().sum()
                 correct_per_token = correct_per_token + (
-                    (k_span.detach() > 0.5) == y.bool().unsqueeze(0)
+                    (alpha_span.detach() > 0.5) == y.bool().unsqueeze(0)
                 ).float().sum()  # y broadcasts to every token in the doc's span
-                n_tokens += k_span.shape[0]
+                n_tokens += alpha_span.shape[0]
         loss = total / len(doc_spans)  # average per-document loss, so batch size doesn't change the scale
         if return_accuracy:
             return loss, correct_or / (len(doc_spans) * n), correct_per_token / (n_tokens * n)
         return loss
 
 
-def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
+def selected_concept_diagnostics(alpha_k, known_labels, doc_spans=None, eps=1e-6):
     """Diagnostic BCE and accuracy for sparse, prototype-routed encoders like
     known_encoder_type="linear_selector". Never contributes a gradient (see
     model.use_concept_loss).
 
-    Only scores the concepts actually selected at each (batch, token) position. k is exactly 0
+    Only scores the concepts actually selected at each (batch, token) position. alpha_k is exactly 0
     everywhere else (see nn.prototype.PrototypePredictor), so scoring every slot the way
     ConceptLoss does would count every unselected concept as a free true negative and bias the
     metric.
 
-    k's value axis is [-1, +1] (see nn.prototype._fixed_value_axis), rescaled to [0, 1] via
-    (k+1)/2 before BCE.
+    alpha_k's value axis is [-1, +1] (see nn.prototype._fixed_value_axis), rescaled to [0, 1] via
+    (alpha_k+1)/2 before BCE.
 
     doc_spans, if given, also returns an OR-aggregated accuracy: per document, per concept that
     was selected at least once somewhere in it, "present" if any selected token's rescaled
@@ -104,11 +104,11 @@ def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
     counted as a free true negative.
     """
     with torch.no_grad():
-        mask = k != 0
+        mask = alpha_k != 0
         if mask.sum() == 0:
-            zero = torch.tensor(0.0, device=k.device)
+            zero = torch.tensor(0.0, device=alpha_k.device)
             return (zero, zero, zero) if doc_spans is not None else (zero, zero)
-        probs = ((k[mask] + 1) / 2).clamp(eps, 1 - eps)
+        probs = ((alpha_k[mask] + 1) / 2).clamp(eps, 1 - eps)
         target = known_labels[mask].float()
         bce = F.binary_cross_entropy(probs, target)
         accuracy = ((probs > 0.5) == target.bool()).float().mean()
@@ -116,10 +116,10 @@ def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
         if doc_spans is None:
             return bce, accuracy
 
-        n = k.shape[-1]
-        prob_full = (k + 1) / 2  # shape: [B, T, n]; unscored (k==0) positions read 0.5, excluded below via mask
-        or_correct = k.new_zeros(())
-        n_scored = k.new_zeros(())
+        n = alpha_k.shape[-1]
+        prob_full = (alpha_k + 1) / 2  # shape: [B, T, n]; unscored (alpha_k==0) positions read 0.5, excluded below via mask
+        or_correct = alpha_k.new_zeros(())
+        n_scored = alpha_k.new_zeros(())
         for batch_idx, tok_start, tok_end, concept_ids in doc_spans:
             p_span = prob_full[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
             s_span = mask[batch_idx, tok_start:tok_end, :]  # shape: [doc_len, n]
@@ -128,7 +128,7 @@ def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
                 continue
             p_for_or = torch.where(s_span, p_span, torch.zeros_like(p_span))  # unselected -> 0, no effect on the product below
             doc_prob = 1 - torch.prod(1 - p_for_or, dim=0)  # shape: [n], soft-OR over selected positions only
-            y = k.new_zeros(n)
+            y = alpha_k.new_zeros(n)
             y[concept_ids] = 1.0
             or_correct = or_correct + ((doc_prob > 0.5) == y.bool())[scored_here].float().sum()
             n_scored = n_scored + scored_here.sum()
@@ -137,43 +137,46 @@ def selected_concept_diagnostics(k, known_labels, doc_spans=None, eps=1e-6):
 
 
 class ReconstructionLoss(nn.Module):
-    """MSE between the unknown head's u_hat and its target (h minus the known concepts'
+    """MSE between the unknown head's u and its target (h minus the known concepts'
     contribution). Trains the unknown head to capture exactly what the known concepts miss.
 
     mask, if given (e.g. the diffusion corruption mask), restricts the loss to those positions.
     None (default) uses every position, which is correct for the causal backbone.
     """
 
-    def forward(self, u_hat, u_hat_gt, mask=None):
-        if u_hat_gt is None:
-            return torch.tensor(0.0, device=u_hat.device)
+    def forward(self, u, u_target, mask=None):
+        if u_target is None:
+            return torch.tensor(0.0, device=u.device)
         if mask is None:
-            return ((u_hat - u_hat_gt) ** 2).mean()  # shape: [B, T, d] -> scalar
+            return ((u - u_target) ** 2).mean()  # shape: [B, T, d] -> scalar
         if mask.sum() == 0:
-            return torch.tensor(0.0, device=u_hat.device)
-        diff = u_hat[mask] - u_hat_gt[mask]  # shape: [B, T, d] -> [n_masked, d]
+            return torch.tensor(0.0, device=u.device)
+        diff = u[mask] - u_target[mask]  # shape: [B, T, d] -> [n_masked, d]
         return (diff ** 2).mean()
 
 
 class IndependenceLoss(nn.Module):
-    """Penalizes correlation between k_hat and u_hat, so the unknown head doesn't just re-learn
+    """Penalizes correlation between k and u, so the unknown head doesn't just re-learn
     what the known head already captures.
 
-    Only the unknown side gets gradient (k_hat is detached): we want the unknown head to adapt
+    Only the unknown side gets gradient (k is detached): we want the unknown head to adapt
     to the known head, not the other way around, since the known head is anchored to human
     labels.
     """
 
-    def forward(self, k_hat, u_hat):
-        d = k_hat.shape[-1]
-        Hk = k_hat.detach().reshape(-1, d)  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
-        Hu = u_hat.reshape(-1, d)  # shape: [B, T, d] -> [B*T, d]
+    MAX_VALUE = 1.0  # ceiling, so a single large-covariance batch can't dominate the total loss
+
+    def forward(self, k, u):
+        d = k.shape[-1]
+        Hk = k.detach().reshape(-1, d)  # shape: [B, T, d] -> [B*T, d], flatten batch+time into one axis of "samples"
+        Hu = u.reshape(-1, d)  # shape: [B, T, d] -> [B*T, d]
         num_tokens = Hk.shape[0]
 
         Phi = Hk - Hk.mean(dim=0, keepdim=True)  # shape: [B*T, d], center each feature across the batch
         Psi = Hu - Hu.mean(dim=0, keepdim=True)  # shape: [B*T, d]
         cross_cov = Psi.t() @ Phi  # shape: [d, B*T] @ [B*T, d] -> [d, d], empirical cross-covariance matrix
-        return (cross_cov ** 2).sum() / (d ** 2 * max(num_tokens - 1, 1))  # normalized Frobenius norm^2
+        hsic = (cross_cov ** 2).sum() / (d ** 2 * max(num_tokens - 1, 1))  # normalized Frobenius norm^2
+        return hsic.clamp(max=self.MAX_VALUE)
 
 
 # shared singletons: these losses have no learnable parameters, so one instance is enough
@@ -229,14 +232,17 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
 
     if use_concept_loss:
         concept_loss, concept_accuracy_or, concept_accuracy_per_token = _concept_loss_fn(
-            intermediates['k'], doc_spans, return_accuracy=True,
+            intermediates['alpha_k'], doc_spans, return_accuracy=True,
         )
     else:
         concept_loss, concept_accuracy_per_token, concept_accuracy_or = selected_concept_diagnostics(
-            intermediates['k'], known_labels, doc_spans=doc_spans,
+            intermediates['alpha_k'], known_labels, doc_spans=doc_spans,
         )
-    rec_loss = _rec_loss_fn(intermediates['u_hat'], intermediates['u_hat_gt'], mask=mask)
-    indep_loss = _indep_loss_fn(intermediates['k_hat'], intermediates['u_hat'])
+    rec_loss = _rec_loss_fn(intermediates['u'], intermediates['u_target'], mask=mask)
+    # against both other channels: epsilon was previously unconstrained, so it could freely carry
+    # whatever the known head encodes
+    indep_loss = (_indep_loss_fn(intermediates['k'], intermediates['u'])
+                  + _indep_loss_fn(intermediates['k'], intermediates['epsilon']))
 
     total_loss = lm_loss + lambda_rec * rec_loss + lambda_indep * indep_loss
     if use_concept_loss:

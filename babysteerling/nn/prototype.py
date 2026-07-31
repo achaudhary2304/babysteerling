@@ -33,7 +33,7 @@ representations live in the same space the rest of the model trains in. Prototyp
 further and runs its (deduped) candidates through the full backbone, so a prototype gets exactly
 as much processing as the real input it's compared against; PrototypeCrossAttention only uses
 the token embedding table, since it touches all Kt concepts every call and can't afford a full
-backbone pass per concept. Each concept's [Kt, d] value embedding (self.K, used to build k_hat
+backbone pass per concept. Each concept's [Kt, d] value embedding (self.K, used to build the embedding
 and as babysteerling.steering's steering direction) stays a plain learned parameter, same as in
 SparseEmbeddingToConcept; only the activation (which concepts fire, how strongly) comes from
 prototypes.
@@ -386,9 +386,8 @@ class PrototypeConceptEncoder(BaseConceptLayer):
         return k @ self.K  # shape: [B, T, Kt] @ [Kt, d] -> [B, T, d]
 
     def forward(self, embeddings):
-        k = self.activation(embeddings)
-        k_hat = self.embed(k)
-        return k, k_hat
+        alpha = self.activation(embeddings)
+        return alpha, self.embed(alpha)
 
     def ground_truth_embedding(self, known_labels):
         return known_labels.float() @ self.K  # shape: [B, T, Kt] @ [Kt, d] -> [B, T, d]
@@ -459,9 +458,8 @@ class PrototypeCrossAttention(BaseConceptLayer):
         return k @ self.K  # shape: [B, T, Kt] @ [Kt, d] -> [B, T, d]
 
     def forward(self, embeddings):
-        k = self.activation(embeddings)
-        k_hat = self.embed(k)
-        return k, k_hat
+        alpha = self.activation(embeddings)
+        return alpha, self.embed(alpha)
 
     def ground_truth_embedding(self, known_labels):
         return known_labels.float() @ self.K  # shape: [B, T, Kt] @ [Kt, d] -> [B, T, d]

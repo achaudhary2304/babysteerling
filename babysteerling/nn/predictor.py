@@ -23,13 +23,13 @@ class LinearEmbeddingToConcept(BaseConceptLayer):
     def forward(self, embeddings):
         return self.head(embeddings)  # shape: [B, T, d] -> [B, T, vocab_size]
 
-    def decompose(self, k_hat, u_hat, epsilon):
+    def decompose(self, k, u, epsilon):
         """Split logits into known/unknown/residual contributions.
 
-        Exact (sums to forward(k_hat + u_hat + epsilon)) when head_type="linear", since the head
-        is then a single linear map with no bias. Only approximate for head_type="mlp".
+        Exact (sums to forward(k + u + epsilon)) when head_type="linear", since the head is then a
+        single linear map with no bias. Only approximate for head_type="mlp".
         """
-        return self.head(k_hat), self.head(u_hat), self.head(epsilon)  # each: [B, T, d] -> [B, T, vocab_size]
+        return self.head(k), self.head(u), self.head(epsilon)  # each: [B, T, d] -> [B, T, vocab_size]
 
 
 class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
@@ -63,7 +63,7 @@ class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
             nn.Linear(mlp_hidden, vocab_size, bias=False),
         )
 
-    def decompose(self, k_hat, u_hat, epsilon):
+    def decompose(self, k, u, epsilon):
         """Split logits into known/unknown/residual contributions.
 
         The head has no biases, so each Linear layer is additive: layer(k) + layer(u) +
@@ -74,10 +74,10 @@ class ReluEmbeddingToConcepts(LinearEmbeddingToConcept):
         separately to k, u, e it would subtract the mean three times instead of once). Both
         statistics (the ReLU mask, RMSNorm's RMS) are computed once from the true sum
         z = k + u + e and applied identically to all three terms, so they still add up exactly
-        to forward(k_hat + u_hat + epsilon).
+        to forward(k + u + epsilon).
         """
-        summed = k_hat + u_hat + epsilon
-        k, u, e = k_hat, u_hat, epsilon
+        summed = k + u + epsilon
+        e = epsilon
         for layer in self.head:
             if isinstance(layer, nn.ReLU):
                 mask = (summed > 0).to(summed.dtype)

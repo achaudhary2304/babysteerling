@@ -126,40 +126,55 @@ class Diffusion(BaseLM):
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
     @torch.no_grad()
-    def generate(self, mask_token_id, seq_len, gen_steps=32, temperature=0.8, top_k=50):
-        """Block-wise MDM sampler: denoise one block at a time, each step committing the most
-        confident of that block's still-masked positions. Later blocks then condition on finished
-        earlier ones, which is the pattern build_block_causal_mask trained the model on.
+    def generate(self, mask_token_id, seq_len, temperature=0.8, top_k=50):
+        """Block-by-block confidence-based MDM sampler, committing one token per step.
+
+        Four things it has to get right, each of which visibly wrecks the output otherwise:
+
+        1. Decode one block at a time, finishing block b before starting b+1. Attention is
+           block-causal, so committing tokens out of block order asks the model to predict block 0
+           from nothing.
+        2. Commit the *most confident* masked position, not a random one, since committing a
+           low-confidence guess early conditions everything after it on that guess.
+        3. Commit exactly ONE token per step. Everything committed in the same step comes from a
+           single forward pass, so those positions cannot condition on each other, which is what
+           produces "said said said" repetition.
+        4. Never emit `[MASK]`. It's in the vocabulary for the corruption process, so it's in the
+           softmax unless excluded, and since decode() drops special tokens, sampling it silently
+           deletes words from the output.
+
+        (3) makes the step count implicit: exactly diff_block_len steps per block, seq_len forward
+        passes in total. No KV cache, so every step re-runs the full forward pass.
         """
         device = next(self.parameters()).device
         was_training = self.training
         self.eval()  # sampling must not apply dropout; MPS also refuses a nonzero dropout_p
         x = torch.full((1, seq_len), mask_token_id, dtype=torch.long,
                        device=device)  # shape: [1, seq_len], start fully masked
-        n_blocks = seq_len // self.diff_block_len
-        steps_per_block = max(gen_steps // n_blocks, 1)
 
-        for b in range(n_blocks):
-            lo, hi = b * self.diff_block_len, (b + 1) * self.diff_block_len
-            for step in range(steps_per_block):
-                still_masked = lo + (x[0, lo:hi] == mask_token_id).nonzero(as_tuple=True)[0]  # shape: [n_still_masked]
-                if still_masked.numel() == 0:
-                    break
+        for block in range(max(1, seq_len // self.diff_block_len)):
+            lo = block * self.diff_block_len
+            hi = min(lo + self.diff_block_len, seq_len)
+
+            while True:
+                still_masked = (x[0, lo:hi] == mask_token_id).nonzero(as_tuple=True)[0]  # block-local indices
+                if len(still_masked) == 0:
+                    break  # (1) this block is done; move to the next
 
                 logits, _ = self(x)  # shape: [1, seq_len, vocab_size]
-                logits[..., mask_token_id] = float('-inf')  # [MASK] is in the vocab, but is never a valid output
-                logits = logits / temperature
-                if top_k is not None:
-                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)  # shape: [1, seq_len, top_k]
-                    logits = logits.masked_fill(logits < v[..., [-1]], float('-inf'))  # mask out everything below the k-th largest logit
-                probs = F.softmax(logits, dim=-1)[0]  # shape: [seq_len, vocab_size]
-                sampled = torch.multinomial(probs, 1).squeeze(-1)  # shape: [seq_len]
-                confidence = probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)  # shape: [seq_len]
+                block_logits = logits[0, lo:hi] / temperature  # shape: [block_len, vocab_size]
+                block_logits[:, mask_token_id] = float('-inf')  # (4) never emit the mask token
 
-                # commit the most confident positions, enough to finish the block on schedule
-                n_commit = -(-still_masked.numel() // (steps_per_block - step))  # ceil division
-                chosen = still_masked[confidence[still_masked].topk(n_commit).indices]
-                x[0, chosen] = sampled[chosen]
+                probs = F.softmax(block_logits, dim=-1)
+                if top_k is not None:
+                    v, _ = torch.topk(block_logits, min(top_k, block_logits.size(-1)), dim=-1)
+                    probs = torch.where(block_logits < v[:, [-1]], torch.zeros_like(probs), probs)
+                    probs = probs / probs.sum(dim=-1, keepdim=True)  # renormalize after truncation
+
+                # (2) confidence = the probability mass on each position's own best token
+                confidence = probs[still_masked].max(dim=-1).values  # shape: [n_still_masked]
+                pos = still_masked[confidence.argmax()]  # (3) exactly one position, the most confident
+                x[0, lo + pos] = torch.multinomial(probs[pos], num_samples=1)
 
         if was_training:
             self.train()

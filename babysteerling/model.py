@@ -126,8 +126,13 @@ class Diffusion(BaseLM):
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
     @torch.no_grad()
-    def generate(self, mask_token_id, seq_len, temperature=0.8, top_k=50):
+    def generate(self, mask_token_id, seq_len, gen_steps=None, temperature=0.8, top_k=50):
         """Block-by-block confidence-based MDM sampler, committing one token per step.
+
+        gen_steps=None (default) commits exactly one position per step, so the step count is
+        implicit: diff_block_len steps per block, seq_len forward passes in total. Set it to an int
+        to spread that many steps over the sequence instead and commit several positions per step,
+        which is faster but see (3) below.
 
         Four things it has to get right, each of which visibly wrecks the output otherwise:
 
@@ -136,15 +141,14 @@ class Diffusion(BaseLM):
            from nothing.
         2. Commit the *most confident* masked position, not a random one, since committing a
            low-confidence guess early conditions everything after it on that guess.
-        3. Commit exactly ONE token per step. Everything committed in the same step comes from a
-           single forward pass, so those positions cannot condition on each other, which is what
-           produces "said said said" repetition.
+        3. Commit ONE token per step. Everything committed in the same step comes from a single
+           forward pass, so those positions cannot condition on each other, which is what produces
+           "said said said" repetition. This is what gen_steps trades away.
         4. Never emit `[MASK]`. It's in the vocabulary for the corruption process, so it's in the
            softmax unless excluded, and since decode() drops special tokens, sampling it silently
            deletes words from the output.
 
-        (3) makes the step count implicit: exactly diff_block_len steps per block, seq_len forward
-        passes in total. No KV cache, so every step re-runs the full forward pass.
+        No KV cache, so every step re-runs the full forward pass.
         """
         device = next(self.parameters()).device
         was_training = self.training
@@ -152,10 +156,14 @@ class Diffusion(BaseLM):
         x = torch.full((1, seq_len), mask_token_id, dtype=torch.long,
                        device=device)  # shape: [1, seq_len], start fully masked
 
-        for block in range(max(1, seq_len // self.diff_block_len)):
+        num_blocks = max(1, seq_len // self.diff_block_len)
+        steps_per_block = None if gen_steps is None else max(1, gen_steps // num_blocks)
+
+        for block in range(num_blocks):
             lo = block * self.diff_block_len
             hi = min(lo + self.diff_block_len, seq_len)
 
+            step = 0
             while True:
                 still_masked = (x[0, lo:hi] == mask_token_id).nonzero(as_tuple=True)[0]  # block-local indices
                 if len(still_masked) == 0:
@@ -173,8 +181,12 @@ class Diffusion(BaseLM):
 
                 # (2) confidence = the probability mass on each position's own best token
                 confidence = probs[still_masked].max(dim=-1).values  # shape: [n_still_masked]
-                pos = still_masked[confidence.argmax()]  # (3) exactly one position, the most confident
-                x[0, lo + pos] = torch.multinomial(probs[pos], num_samples=1)
+                n_commit = 1 if steps_per_block is None else (  # (3) one position unless gen_steps says otherwise
+                    -(-len(still_masked) // max(1, steps_per_block - step))  # ceil, to finish the block on schedule
+                )
+                pos = still_masked[confidence.topk(n_commit).indices]  # the most confident positions
+                x[0, lo + pos] = torch.multinomial(probs[pos], num_samples=1).squeeze(-1)
+                step += 1
 
         if was_training:
             self.train()

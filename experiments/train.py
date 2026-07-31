@@ -324,7 +324,7 @@ def main(cfg: DictConfig):
     if is_diffusion:
         sample_ids = model.generate(
             mask_token_id, seq_len=cfg.data.block_size,
-            temperature=cfg.training.gen_temperature,
+            gen_steps=cfg.training.gen_steps, temperature=cfg.training.gen_temperature,
             top_k=cfg.training.gen_top_k,
         )
     else:

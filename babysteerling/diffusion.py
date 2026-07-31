@@ -27,25 +27,29 @@ def sample_noise_levels(num_blocks, device):
     return torch.rand(num_blocks, device=device)
 
 
-def corrupt(x0, mask_token_id, diff_block_len):
+def corrupt(x0, mask_token_id, diff_block_len, t_min=1e-3):
     """Masks tokens independently, using a per-block noise level.
 
     x0: LongTensor [B, T], T must be divisible by diff_block_len.
-    Returns (x_t, mask): the corrupted sequence and a boolean mask of which positions were
-    replaced. loss.compute_losses(..., mask=mask) uses this mask to only score positions that
-    actually had something to predict.
+    Returns (x_t, mask, p_mask): the corrupted sequence, a boolean mask of which positions were
+    replaced, and each position's masking probability. loss.compute_losses(..., mask=mask,
+    mask_weights=p_mask) uses the mask to only score positions that actually had something to
+    predict, and p_mask to weight them.
+
+    t is clamped to at least t_min, since 1/p_mask is the ELBO's importance weight and t ~ 0
+    would make it explode.
     """
     B, T = x0.shape
     assert T % diff_block_len == 0, "sequence length must be divisible by the diffusion block length"
     num_blocks = T // diff_block_len
 
-    t = sample_noise_levels(B * num_blocks, x0.device).view(B, num_blocks)  # shape: [B*num_blocks] -> [B, num_blocks]
+    t = sample_noise_levels(B * num_blocks, x0.device).view(B, num_blocks).clamp(min=t_min)  # shape: [B*num_blocks] -> [B, num_blocks]
     t_per_token = t.repeat_interleave(diff_block_len, dim=1)  # shape: [B, num_blocks] -> [B, T], broadcast each block's t to its tokens
 
     mask = torch.rand(B, T, device=x0.device) < t_per_token  # shape: [B, T], True where this token gets masked
     x_t = x0.clone()
     x_t[mask] = mask_token_id
-    return x_t, mask
+    return x_t, mask, t_per_token
 
 
 def ensure_mask_token(tokenizer, mask_token="[MASK]"):

@@ -118,6 +118,7 @@ class Diffusion(BaseLM):
     def __init__(self, *args, diff_block_len=None, **kwargs):
         super().__init__(*args, **kwargs)
         assert diff_block_len is not None, "diff_block_len is required for the diffusion backbone"
+        self.diff_block_len = diff_block_len
         from .diffusion import build_block_causal_mask  # local import: diffusion.py doesn't need to import nn.py
         attn_mask = build_block_causal_mask(self.block_size, diff_block_len)
 
@@ -125,41 +126,43 @@ class Diffusion(BaseLM):
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
     @torch.no_grad()
-    def generate(model, mask_token_id, seq_len, vocab_size, gen_steps=32, temperature=0.8, top_k=50):
-        """Simple random-remasking sampler for the diffusion model, just to sanity-check output.
-        Not the paper's efficient block-wise, KV-cached inference. Works on any model with
-        BaseLM's forward(idx) -> (logits, intermediates) interface.
+    def generate(self, mask_token_id, seq_len, gen_steps=32, temperature=0.8, top_k=50):
+        """Block-wise MDM sampler: denoise one block at a time, each step committing the most
+        confident of that block's still-masked positions. Later blocks then condition on finished
+        earlier ones, which is the pattern build_block_causal_mask trained the model on.
         """
-        device = next(model.parameters()).device
-        model.eval()
+        device = next(self.parameters()).device
+        was_training = self.training
+        self.eval()  # sampling must not apply dropout; MPS also refuses a nonzero dropout_p
         x = torch.full((1, seq_len), mask_token_id, dtype=torch.long,
                        device=device)  # shape: [1, seq_len], start fully masked
-        masked = torch.ones_like(x, dtype=torch.bool)  # shape: [1, seq_len], tracks which positions are still masked
+        n_blocks = seq_len // self.diff_block_len
+        steps_per_block = max(gen_steps // n_blocks, 1)
 
-        for step in range(1, gen_steps + 1):
-            logits, _ = model(x)  # shape: [1, seq_len, vocab_size]
-            target_masked_count = round(
-                seq_len * (1 - step / gen_steps))  # shrink the masked budget linearly over gen_steps
+        for b in range(n_blocks):
+            lo, hi = b * self.diff_block_len, (b + 1) * self.diff_block_len
+            for step in range(steps_per_block):
+                still_masked = lo + (x[0, lo:hi] == mask_token_id).nonzero(as_tuple=True)[0]  # shape: [n_still_masked]
+                if still_masked.numel() == 0:
+                    break
 
-            probs = F.softmax(logits / temperature, dim=-1)  # shape: [1, seq_len, vocab_size]
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)  # shape: [1, seq_len, top_k]
-                probs = torch.where(logits < v[..., [-1]], torch.zeros_like(probs), probs)  # zero out everything below the k-th largest logit
-                probs = probs / probs.sum(dim=-1, keepdim=True)  # renormalize after truncation
-            sampled = torch.multinomial(probs.view(-1, vocab_size), 1).view(1,
-                                                                            seq_len)  # shape: [seq_len, vocab_size] -> [seq_len, 1] -> [1, seq_len]
+                logits, _ = self(x)  # shape: [1, seq_len, vocab_size]
+                logits[..., mask_token_id] = float('-inf')  # [MASK] is in the vocab, but is never a valid output
+                logits = logits / temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)  # shape: [1, seq_len, top_k]
+                    logits = logits.masked_fill(logits < v[..., [-1]], float('-inf'))  # mask out everything below the k-th largest logit
+                probs = F.softmax(logits, dim=-1)[0]  # shape: [seq_len, vocab_size]
+                sampled = torch.multinomial(probs, 1).squeeze(-1)  # shape: [seq_len]
+                confidence = probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)  # shape: [seq_len]
 
-            masked_positions = masked[0].nonzero(as_tuple=True)[
-                0]  # shape: [n_still_masked], indices of masked positions
-            num_to_reveal = max(len(masked_positions) - target_masked_count, 0)
-            if num_to_reveal > 0:
-                # reveal a random subset of currently-masked positions, not necessarily the most
-                # confident ones: simplest possible sampler, good enough for a sanity check
-                reveal_idx = masked_positions[torch.randperm(len(masked_positions))[:num_to_reveal]]
-                x[0, reveal_idx] = sampled[0, reveal_idx]
-                masked[0, reveal_idx] = False
+                # commit the most confident positions, enough to finish the block on schedule
+                n_commit = -(-still_masked.numel() // (steps_per_block - step))  # ceil division
+                chosen = still_masked[confidence[still_masked].topk(n_commit).indices]
+                x[0, chosen] = sampled[chosen]
 
-        model.train()
+        if was_training:
+            self.train()
         return x[0].tolist()
 
 

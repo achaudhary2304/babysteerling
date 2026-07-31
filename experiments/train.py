@@ -323,7 +323,7 @@ def main(cfg: DictConfig):
     # next to the loss curves
     if is_diffusion:
         sample_ids = model.generate(
-            mask_token_id, seq_len=cfg.data.block_size, vocab_size=vocab_size,
+            mask_token_id, seq_len=cfg.data.block_size,
             gen_steps=cfg.training.gen_steps, temperature=cfg.training.gen_temperature,
             top_k=cfg.training.gen_top_k,
         )

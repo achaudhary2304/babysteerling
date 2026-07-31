@@ -166,7 +166,7 @@ _indep_loss_fn = IndependenceLoss()
 
 def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
                     lambda_concept=1.0, lambda_rec=1.0, lambda_indep=1.0, mask=None,
-                    use_concept_loss=True):
+                    mask_weights=None, use_concept_loss=True):
     """Combines all four loss terms into the total training loss.
 
     mask, if given (e.g. the diffusion backbone's corruption mask), restricts the LM and
@@ -191,7 +191,14 @@ def compute_losses(logits, targets, intermediates, doc_spans, known_labels=None,
         lm_loss = torch.tensor(0.0, device=logits.device)
         lm_accuracy = torch.tensor(0.0, device=logits.device)
     else:
-        lm_loss = F.cross_entropy(logits[mask], targets[mask])  # shape: [B, T, vocab] -> [n_masked, vocab] vs [n_masked]
+        ce = F.cross_entropy(logits[mask], targets[mask], reduction='none')  # shape: [B, T, vocab] -> [n_masked, vocab] vs [n_masked]
+        if mask_weights is None:
+            lm_loss = ce.mean()
+        else:
+            # the masked-diffusion ELBO weights each masked position by 1/p_mask and averages over
+            # every position, not just the masked ones. Without it, lightly-masked blocks (small t,
+            # few positions kept) count for less than they should and the loss is biased.
+            lm_loss = (ce / mask_weights[mask]).sum() / mask.numel()
         lm_accuracy = (pred_ids[mask] == targets[mask]).float().mean()
 
     if not intermediates:  # no bottleneck: cross-entropy is the whole loss

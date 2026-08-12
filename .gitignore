@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Hydra run dirs, checkpoints and W&B logs
+experiments/outputs/
+experiments/multirun/
+experiments/checkpoints/
+wandb/

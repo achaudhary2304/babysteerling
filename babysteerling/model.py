@@ -25,38 +25,42 @@ from .nn.bottleneck import ConceptBottleneck
 from .nn.predictor import LinearEmbeddingToConcept, ReluEmbeddingToConcepts
 
 
-class SteerlingGPT(nn.Module):
-    """Backbone + concept bottleneck + head, as one module.
+class BaseLM(nn.Module):
+    """Backbone + optional concept bottleneck + head, as one module.
 
     One nn.Module instead of three separate objects, so model.parameters() and
     model.state_dict() automatically dedupe the tied embedding/head weight.
 
-    backbone_type="causal" (default): normal next-token attention. backbone_type="diffusion":
-    block-causal attention (bidirectional inside a block of `diff_block_len` tokens, causal
-    across blocks), for the masked-diffusion objective in babysteerling.diffusion. This class
-    only builds the attention mask; corruption and sampling live in babysteerling.diffusion.
+    interpretable=False skips the bottleneck entirely and forward() returns an empty intermediates
+    dict, which compute_losses reads as "score cross-entropy only". Same training loop either way,
+    so a no-bottleneck run is a like-for-like baseline for what the bottleneck costs.
+
+    Subclasses set the attention mask and generate(): GPT (causal) and Diffusion (block-causal).
     """
 
     def __init__(self, vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers,
-                 dropout, n_concepts, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
-                 top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal",
+                 dropout, interpretable=True, n_concepts=None, unknown_ratio=3, p_epsilon=0.1,
+                 unknown_rank=None, top_k_known=None, top_k_unknown=None, head_type="linear",
+                 tie_weights=True, head_mlp_hidden=None,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
                  known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
                  predictor_type="prototype", lifted_top_k=5):
         super().__init__()
         self.block_size = block_size
-        self.backbone_type = backbone_type
         self.backbone = TransformerModel(vocab_size, n_embed, block_size, num_heads, n_layers, dropout, num_kv_heads)
-        self.bottleneck = ConceptBottleneck(
-            n_embed, n_concepts, unknown_ratio=unknown_ratio, p_epsilon=p_epsilon,
-            unknown_rank=unknown_rank, top_k_known=top_k_known, top_k_unknown=top_k_unknown,
-            known_encoder_type=known_encoder_type, proto_token_ids=proto_token_ids,
-            backbone=self.backbone, topk_axis=topk_axis,
-            chunk_size=chunk_size, key_dim=known_key_dim, use_checkpoint=use_checkpoint,
-            candidates_per_token=candidates_per_token,
-            predictor_type=predictor_type, lifted_top_k=lifted_top_k,
-        )
+        if interpretable:
+            assert n_concepts is not None, "n_concepts is required when interpretable=True"
+            self.bottleneck = ConceptBottleneck(
+                n_embed, n_concepts, unknown_ratio=unknown_ratio, p_epsilon=p_epsilon,
+                unknown_rank=unknown_rank, top_k_known=top_k_known, top_k_unknown=top_k_unknown,
+                known_encoder_type=known_encoder_type, proto_token_ids=proto_token_ids,
+                backbone=self.backbone, topk_axis=topk_axis,
+                chunk_size=chunk_size, key_dim=known_key_dim, use_checkpoint=use_checkpoint,
+                candidates_per_token=candidates_per_token,
+                predictor_type=predictor_type, lifted_top_k=lifted_top_k,
+            )
+        else:
+            self.bottleneck = None
         tied_embedding = self.backbone.token_embedding_table.weight if tie_weights else None
         if head_type == "linear":
             self.head = LinearEmbeddingToConcept(
@@ -73,13 +77,21 @@ class SteerlingGPT(nn.Module):
 
     def forward(self, idx, known_labels=None):
         h = self.backbone(idx, attn_mask=self.attn_mask)  # shape: [B, T, n_embed]
+        if self.bottleneck is None:
+            return self.head(h), {}  # known_labels accepted and ignored
         h_bar, intermediates = self.bottleneck(h, known_labels=known_labels)
         logits = self.head(h_bar)  # shape: [B, T, vocab_size]
         return logits, intermediates
 
+
+class GPT(BaseLM):
+    """Next-token prediction: causal attention (attn_mask=None), autoregressive sampling."""
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """Autoregressive sampling, one token at a time, cropping context to block_size."""
+        was_training = self.training
+        self.eval()  # sampling must not apply dropout; MPS also refuses a nonzero dropout_p
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]  # shape: [B, <=block_size], keep only the last block_size tokens
             logits, _ = self(idx_cond)
@@ -92,52 +104,22 @@ class SteerlingGPT(nn.Module):
             probs = F.softmax(logits, dim=-1)  # shape: [B, vocab]
             idx_next = torch.multinomial(probs, num_samples=1)  # shape: [B, 1]
             idx = torch.cat((idx, idx_next), dim=1)  # shape: [B, T] -> [B, T+1]
+        if was_training:
+            self.train()
         return idx
 
 
-class SteerlingDiffusion(SteerlingGPT):
-    """SteerlingGPT with a diffusion-specific generate(). Everything else (forward, backbone,
-    bottleneck, head) is unchanged; only the sampling procedure differs.
+class Diffusion(BaseLM):
+    """Masked block diffusion: block-causal attention (bidirectional inside a block of
+    `diff_block_len` tokens, causal across blocks), iterative denoising. This class only builds the
+    attention mask; corruption and the noise schedule live in babysteerling.diffusion.
     """
 
-    def __init__(self, vocab_size, block_size, n_embed, num_heads, num_kv_heads, n_layers,
-                 dropout, n_concepts, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
-                 top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
-                 known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
-                 known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
-                 predictor_type="prototype", lifted_top_k=5):
-        super().__init__(
-            vocab_size=vocab_size,
-            block_size=block_size,
-            n_embed=n_embed,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            n_layers=n_layers,
-            dropout=dropout,
-            n_concepts=n_concepts,
-            unknown_ratio=unknown_ratio,
-            p_epsilon=p_epsilon,
-            unknown_rank=unknown_rank,
-            top_k_known=top_k_known,
-            top_k_unknown=top_k_unknown,
-            head_type=head_type,
-            tie_weights=tie_weights,
-            head_mlp_hidden=head_mlp_hidden,
-            backbone_type=backbone_type,
-            known_encoder_type=known_encoder_type,
-            proto_token_ids=proto_token_ids,
-            topk_axis=topk_axis,
-            chunk_size=chunk_size,
-            known_key_dim=known_key_dim,
-            use_checkpoint=use_checkpoint,
-            candidates_per_token=candidates_per_token,
-            predictor_type=predictor_type,
-            lifted_top_k=lifted_top_k,
-        )
-        assert diff_block_len is not None, "diff_block_len is required when backbone_type='diffusion'"
+    def __init__(self, *args, diff_block_len=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert diff_block_len is not None, "diff_block_len is required for the diffusion backbone"
         from .diffusion import build_block_causal_mask  # local import: diffusion.py doesn't need to import nn.py
-        attn_mask = build_block_causal_mask(block_size, diff_block_len)
+        attn_mask = build_block_causal_mask(self.block_size, diff_block_len)
 
         # non-persistent: it's cheap to rebuild and shouldn't be saved into/loaded from checkpoints
         self.register_buffer("attn_mask", attn_mask, persistent=False)
@@ -146,7 +128,7 @@ class SteerlingDiffusion(SteerlingGPT):
     def generate(model, mask_token_id, seq_len, vocab_size, gen_steps=32, temperature=0.8, top_k=50):
         """Simple random-remasking sampler for the diffusion model, just to sanity-check output.
         Not the paper's efficient block-wise, KV-cached inference. Works on any model with
-        SteerlingGPT's forward(idx) -> (logits, intermediates) interface.
+        BaseLM's forward(idx) -> (logits, intermediates) interface.
         """
         device = next(model.parameters()).device
         model.eval()
@@ -184,13 +166,15 @@ class SteerlingDiffusion(SteerlingGPT):
 def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, num_kv_heads=2,
                  n_layers=4, dropout=0.2, unknown_ratio=3, p_epsilon=0.1, unknown_rank=None,
                  top_k_known=None, top_k_unknown=None, head_type="linear", tie_weights=True,
-                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None,
+                 head_mlp_hidden=None, backbone_type="causal", diff_block_len=None, interpretable=True,
                  known_encoder_type="dense", proto_token_ids=None, topk_axis=5, chunk_size=4096,
                  known_key_dim=None, use_checkpoint=True, candidates_per_token=25,
                  predictor_type="prototype", lifted_top_k=5):
-    """Builds a SteerlingGPT from plain keyword arguments. No config object needed, so it works
-    the same whether the caller uses Hydra or not (see experiments/train.py for the adapter that
-    unpacks `cfg.model` into this call).
+    """Builds a GPT (causal) or Diffusion (block-causal) model from plain keyword arguments.
+
+    interpretable=False drops the concept bottleneck, giving a plain-LM baseline for measuring what
+    the bottleneck costs. No config object needed, so it works the same whether the caller uses
+    Hydra or not (see experiments/train.py for the adapter that unpacks `cfg.model` into this call).
 
     known_encoder_type: "dense" (default, a small MLP over the known concept library),
     "linear_selector" or "product_key" (score a subset of concepts against their prototype
@@ -203,64 +187,37 @@ def build_model(vocab_size, n_concepts, block_size, n_embed=128, num_heads=4, nu
     from babysteerling.data.utils.load_lifted_token_prototypes). See nn.bottleneck's
     _build_known_encoder.
     """
+    kwargs = dict(
+        vocab_size=vocab_size,
+        block_size=block_size,
+        n_embed=n_embed,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        n_layers=n_layers,
+        dropout=dropout,
+        interpretable=interpretable,
+        n_concepts=n_concepts,
+        unknown_ratio=unknown_ratio,
+        p_epsilon=p_epsilon,
+        unknown_rank=unknown_rank,
+        top_k_known=top_k_known,
+        top_k_unknown=top_k_unknown,
+        head_type=head_type,
+        tie_weights=tie_weights,
+        head_mlp_hidden=head_mlp_hidden,
+        known_encoder_type=known_encoder_type,
+        proto_token_ids=proto_token_ids,
+        topk_axis=topk_axis,
+        chunk_size=chunk_size,
+        known_key_dim=known_key_dim,
+        use_checkpoint=use_checkpoint,
+        candidates_per_token=candidates_per_token,
+        predictor_type=predictor_type,
+        lifted_top_k=lifted_top_k,
+    )
     if backbone_type.lower() == "causal":
-        return SteerlingGPT(
-            vocab_size=vocab_size,
-            block_size=block_size,
-            n_embed=n_embed,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            n_layers=n_layers,
-            dropout=dropout,
-            n_concepts=n_concepts,
-            unknown_ratio=unknown_ratio,
-            p_epsilon=p_epsilon,
-            unknown_rank=unknown_rank,
-            top_k_known=top_k_known,
-            top_k_unknown=top_k_unknown,
-            head_type=head_type,
-            tie_weights=tie_weights,
-            head_mlp_hidden=head_mlp_hidden,
-            backbone_type=backbone_type,
-            known_encoder_type=known_encoder_type,
-            proto_token_ids=proto_token_ids,
-            topk_axis=topk_axis,
-            chunk_size=chunk_size,
-            known_key_dim=known_key_dim,
-            use_checkpoint=use_checkpoint,
-            candidates_per_token=candidates_per_token,
-            predictor_type=predictor_type,
-            lifted_top_k=lifted_top_k,
-        )
+        return GPT(**kwargs)
     elif backbone_type.lower() == "diffusion":
-        return SteerlingDiffusion(
-            vocab_size=vocab_size,
-            block_size=block_size,
-            n_embed=n_embed,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            n_layers=n_layers,
-            dropout=dropout,
-            n_concepts=n_concepts,
-            unknown_ratio=unknown_ratio,
-            p_epsilon=p_epsilon,
-            unknown_rank=unknown_rank,
-            top_k_known=top_k_known,
-            top_k_unknown=top_k_unknown,
-            head_type=head_type,
-            tie_weights=tie_weights,
-            head_mlp_hidden=head_mlp_hidden,
-            backbone_type=backbone_type,
-            diff_block_len=diff_block_len,
-            known_encoder_type=known_encoder_type,
-            proto_token_ids=proto_token_ids,
-            topk_axis=topk_axis,
-            chunk_size=chunk_size,
-            known_key_dim=known_key_dim,
-            use_checkpoint=use_checkpoint,
-            candidates_per_token=candidates_per_token,
-            predictor_type=predictor_type,
-            lifted_top_k=lifted_top_k,
-        )
+        return Diffusion(**kwargs, diff_block_len=diff_block_len)
     else:
         raise ValueError(f"Unsupported backbone_type: {backbone_type}. Supported types are 'causal' and 'diffusion'.")

@@ -12,6 +12,7 @@ backbone_type: causal
 diff_block_len: null  # required when backbone_type: diffusion (block_size must be divisible by it)
 
 # concept bottleneck
+interpretable: true  # false drops the bottleneck: a plain-LM baseline for measuring what it costs
 unknown_ratio: 3     # m (unknown concepts) = unknown_ratio * n (known concepts)
 unknown_rank: null   # set an int (e.g. 32) to low-rank factorize the unknown embedding table
 top_k_known: null    # set an int to sparsify known-concept activations per token

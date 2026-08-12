@@ -26,6 +26,8 @@ def concept_contribution(head, intermediates, targets, mask=None):
     the unknown-concept path (Section 6.1.2 / Eq. 22). Exact for head_type="linear"; approximate
     for "mlp". Doesn't depend on babysteerling.steering, so it's always computed.
     """
+    if not intermediates:
+        return 0.0, 0.0
     k_logits, u_logits, eps_logits = head.decompose(intermediates['k_hat'], intermediates['u_hat'], intermediates['epsilon'])
     k_term = k_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()    # shape: [B,T,vocab] -> [B,T]
     u_term = u_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()

@@ -5,7 +5,7 @@ technical report (see NOTICE).
 """
 from .loss import ConceptLoss, IndependenceLoss, ReconstructionLoss, compute_losses
 from . import nn
-from .model import SteerlingDiffusion, SteerlingGPT, build_model
+from .model import BaseLM, Diffusion, GPT, build_model
 from .training import estimate_loss, get_lr, run_batch
 from .steering import steered, injected_at, InterventionModule, AddDirectionStrategy
 
@@ -14,8 +14,9 @@ __version__ = "0.1.0"
 __all__ = [
     "nn",
 
-    "SteerlingGPT",
-    "SteerlingDiffusion",
+    "BaseLM",
+    "GPT",
+    "Diffusion",
     "build_model",
 
     "steered",

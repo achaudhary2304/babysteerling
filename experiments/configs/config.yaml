@@ -2,7 +2,7 @@
 # on the command line, e.g. `python train.py model=deep_head data.batch_size=32`.
 defaults:
   - data: tinystories
-  - model: base
+  - model: steerling_gpt
   - training: default
   - wandb: default
   - atlas: default

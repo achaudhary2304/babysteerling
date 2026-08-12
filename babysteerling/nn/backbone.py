@@ -93,10 +93,9 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_embed)
 
     def forward(self, x, attn_mask=None):
-        x = self.ln1(x)
-        x = x + self.sa_head(x, attn_mask)  # residual connection around attention
-        x = self.ln2(x)
-        x = x + self.ffwd(x)  # residual connection around the feedforward
+        # normalize each sub-layer's input, not the residual stream itself
+        x = x + self.sa_head(self.ln1(x), attn_mask)  # residual connection around attention
+        x = x + self.ffwd(self.ln2(x))  # residual connection around the feedforward
         return x
 
 

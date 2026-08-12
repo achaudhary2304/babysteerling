@@ -16,6 +16,8 @@ lambda_indep: 1.0
 
 # sanity-check generation at the end of training
 gen_max_new_tokens: 500   # causal backbone only
-gen_steps: 32             # diffusion backbone only: number of iterative denoising steps
+# diffusion only: total denoising steps. null commits one position per step, which is best
+# quality; an int is faster but commits several per step from a single forward pass
+gen_steps: null
 gen_temperature: 0.8
 gen_top_k: 50

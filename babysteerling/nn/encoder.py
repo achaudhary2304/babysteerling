@@ -24,7 +24,7 @@ class SparseEmbeddingToConcept(BaseConceptLayer):
     table when m is large enough that a dense [m, d] table would dominate the parameter count.
     """
 
-    def __init__(self, in_embeddings, out_concepts, hidden_dim=None, rank=None, top_k=None):
+    def __init__(self, in_embeddings, out_concepts, rank=None, top_k=None, logit_clamp=15.0):
         super().__init__(
             out_concepts=out_concepts,
             in_concepts=None,  # Concepts come from encoder, not traditional input
@@ -32,8 +32,13 @@ class SparseEmbeddingToConcept(BaseConceptLayer):
         )
         m = self.out_concepts_shape
         d = self.in_embeddings_shape
-        hidden_dim = hidden_dim or d
-        self.g = nn.Sequential(nn.Linear(d, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, m))
+        self.predictor = nn.Linear(d, m)
+        # explicit std=0.02, matching the embedding table below. Without it the predictor keeps
+        # nn.Linear's kaiming-uniform default (std ~0.051 at d=128), and wider initial logits push
+        # the sigmoid toward saturation, where the gradient vanishes and a concept can't recover.
+        nn.init.normal_(self.predictor.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.predictor.bias)
+        self.logit_clamp = logit_clamp
         self.rank = rank
         if rank is None:
             self.K = nn.Parameter(torch.randn(m, d) * 0.02)  # shape: [m, d]
@@ -44,8 +49,12 @@ class SparseEmbeddingToConcept(BaseConceptLayer):
         self.top_k = top_k
 
     def activation(self, embeddings):
-        u = torch.sigmoid(self.g(embeddings))  # shape: [B, T, d] -> [B, T, m]
-        return sparsify_top_k(u, self.top_k)
+        logits = self.predictor(embeddings)  # shape: [B, T, d] -> [B, T, m]
+        if self.logit_clamp is not None:
+            # an unbounded logit saturates the sigmoid to exactly 0 or 1, where the gradient is 0.
+            # It also makes 1 - u round to 0, which ConceptLoss's log-space aggregation can't take.
+            logits = logits.clamp(-self.logit_clamp, self.logit_clamp)
+        return sparsify_top_k(torch.sigmoid(logits), self.top_k)
 
     def embed(self, u):
         if self.rank is None:

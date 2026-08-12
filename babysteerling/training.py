@@ -28,7 +28,9 @@ def concept_contribution(head, intermediates, targets, mask=None):
     """
     if not intermediates:
         return 0.0, 0.0
-    k_logits, u_logits, eps_logits = head.decompose(intermediates['k_hat'], intermediates['u_hat'], intermediates['epsilon'])
+    # decomposes on k_hat_used, since that's what formed h_bar; using k_hat would stop the
+    # attribution summing to the logits the model actually produced
+    k_logits, u_logits, eps_logits = head.decompose(intermediates['k_hat_used'], intermediates['u_hat'], intermediates['epsilon'])
     k_term = k_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()    # shape: [B,T,vocab] -> [B,T]
     u_term = u_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()
     eps_term = eps_logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1).abs()
@@ -121,7 +123,7 @@ def run_diffusion_batch(model, tokens, doc_records, doc_starts, n_train, n_conce
         tokens, split, block_size, batch_size, n_train, device,
     )  # x0: [batch_size, block_size]; get_batch's shift-by-one target is unused here, since
     # diffusion predicts the clean x0 at masked positions, not the next token
-    x_t, mask = diffusion.corrupt(x0, mask_token_id, diff_block_len)  # x_t, mask: [batch_size, block_size]
+    x_t, mask, p_mask = diffusion.corrupt(x0, mask_token_id, diff_block_len)  # x_t, mask, p_mask: [batch_size, block_size]
 
     doc_spans, known_labels = build_supervision(
         doc_records, doc_starts, starts, block_size, n_concepts, device,
@@ -131,7 +133,7 @@ def run_diffusion_batch(model, tokens, doc_records, doc_starts, n_train, n_conce
     total_loss, components = compute_losses(
         logits, x0, intermediates, doc_spans, known_labels=known_labels,
         lambda_concept=lambda_concept, lambda_rec=lambda_rec, lambda_indep=lambda_indep, mask=mask,
-        use_concept_loss=use_concept_loss,
+        mask_weights=p_mask, use_concept_loss=use_concept_loss,
     )
     components['known_contribution'], components['unknown_contribution'] = concept_contribution(
         model.head, intermediates, x0, mask=mask,

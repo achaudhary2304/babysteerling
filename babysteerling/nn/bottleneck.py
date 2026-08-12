@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 from .encoder import SparseEmbeddingToConcept
 from .prototype import (
@@ -61,23 +62,31 @@ def _build_known_encoder(known_encoder_type, d, n, top_k_known, proto_token_ids,
 
 
 class ResidualModule(nn.Module):
-    """epsilon = h - k_hat - u_hat: whatever the two concept heads don't reconstruct.
+    """epsilon = h - k - u: whatever the two concept heads don't reconstruct.
 
     Dropout on epsilon discourages the model from routing information through this
-    uninterpretable channel just because it's easier than using a concept.
+    uninterpretable channel just because it's easier than using a concept. It only bites when the
+    whole residual is gone, since h_bar is then k + u and those two have to carry the
+    sequence on their own. Per-element dropout doesn't achieve that: it zeroes 10% of individual
+    numbers and rescales the rest by 1/(1-p), so h_bar stays close to h on every sequence. Dropping
+    the residual for 10% of *sequences* instead, all or nothing.
     """
 
     def __init__(self, p_epsilon=0.1):
         super().__init__()
-        self.dropout = nn.Dropout(p_epsilon)
+        self.p_epsilon = p_epsilon
 
-    def forward(self, h, k_hat, u_hat):
-        epsilon = h - k_hat - u_hat  # shape: [B, T, d], same shape as h
-        return self.dropout(epsilon)
+    def forward(self, h, k, u):
+        epsilon = h - k - u  # shape: [B, T, d], same shape as h
+        if self.training and self.p_epsilon > 0:
+            keep = (torch.rand(epsilon.shape[0], 1, 1, device=epsilon.device)
+                    >= self.p_epsilon).to(epsilon.dtype)  # shape: [B, 1, 1], one draw per sequence
+            epsilon = epsilon * keep
+        return epsilon
 
 
 class ConceptBottleneck(nn.Module):
-    """Composes the three heads: h_bar = k_hat + u_hat + epsilon.
+    """Composes the three heads: h_bar = k + u + epsilon.
 
     known_encoder_type picks self.known: "dense" (default, a small MLP over the known concept
     library), "linear_selector"/"product_key" (score a subset of concepts against their
@@ -103,27 +112,29 @@ class ConceptBottleneck(nn.Module):
         self.residual = ResidualModule(p_epsilon)
 
     def forward(self, h, known_labels=None):
-        k, k_hat = self.known(h)
-        u, u_hat = self.unknown(h)
+        alpha_k, k = self.known(h)
+        # h is detached into the unknown head, so its gradient doesn't reach the backbone and it
+        # can't pull h toward "easy to reconstruct"
+        alpha_u, u = self.unknown(h.detach())
 
-        k_hat_gt, u_hat_gt = None, None
+        k_gt, u_target = None, None
         if known_labels is not None:
-            k_hat_gt = self.known.ground_truth_embedding(known_labels)  # shape: [B, T, d]
-            u_hat_gt = h - k_hat_gt  # shape: [B, T, d], target for the unknown head's reconstruction loss
+            k_gt = self.known.ground_truth_embedding(known_labels)  # shape: [B, T, d]
+            u_target = h - k_gt  # shape: [B, T, d], target for the unknown head's reconstruction loss
 
         # teacher forcing: feed the LM head the ground-truth concept embedding while training, so it
         # isn't learning from an unconverged concept head. Gated on self.training, since
         # build_supervision provides known_labels at eval too and without the gate validation would
         # be handed the correct concepts, making val/lm measure an easier task than the
         # no-bottleneck baseline does.
-        k_hat_used = k_hat_gt if (self.training and k_hat_gt is not None) else k_hat
+        k_lm = k_gt if (self.training and k_gt is not None) else k
 
-        epsilon = self.residual(h, k_hat_used, u_hat)  # shape: [B, T, d]
-        h_bar = k_hat_used + u_hat + epsilon  # shape: [B, T, d], exactly reconstructs h in expectation
+        epsilon = self.residual(h, k_lm, u)  # shape: [B, T, d]
+        h_bar = k_lm + u + epsilon  # shape: [B, T, d], exactly reconstructs h in expectation
 
         intermediates = {
-            'k': k, 'u': u, 'k_hat': k_hat, 'u_hat': u_hat,  # predicted: what the losses score
-            'k_hat_used': k_hat_used,  # what actually formed h_bar (ground truth while training)
-            'k_hat_gt': k_hat_gt, 'u_hat_gt': u_hat_gt, 'epsilon': epsilon,
+            'alpha_k': alpha_k, 'alpha_u': alpha_u, 'k': k, 'u': u,  # predicted: what the losses score
+            'k_lm': k_lm,  # what actually formed h_bar (ground truth while training)
+            'k_gt': k_gt, 'u_target': u_target, 'epsilon': epsilon,
         }
         return h_bar, intermediates

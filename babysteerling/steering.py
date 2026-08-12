@@ -212,16 +212,16 @@ def sample_steering_target(doc_spans, lifted_tokens):
     return random.choice(candidates)
 
 
-def respond_loss(k, concept_id, position_mask):
+def respond_loss(alpha_k, concept_id, position_mask):
     """Eq. 31: pushes the injected concept's own activation k_{c,t} toward 1 at its attributed
     positions, training the concept module to notice the concept it was just steered toward.
     k: the known head's activation [B, T, n] from a post-injection forward pass. position_mask:
     [B, T] bool, from positions_for_concept.
     """
     if position_mask.sum() == 0:
-        return torch.tensor(0.0, device=k.device)
-    k_c = k[..., concept_id]  # shape: [B, T, n] -> [B, T]
-    return -torch.log(k_c[position_mask].clamp(1e-6, 1.0)).mean()
+        return torch.tensor(0.0, device=alpha_k.device)
+    alpha_c = alpha_k[..., concept_id]  # shape: [B, T, n] -> [B, T]
+    return -torch.log(alpha_c[position_mask].clamp(1e-6, 1.0)).mean()
 
 
 def express_loss(logits, lifted_token_ids, position_mask):
@@ -252,16 +252,16 @@ def steering_ability_metrics(model, xb, doc_spans, lifted_tokens, inj_layer=1, t
     lifted = torch.as_tensor(lifted_tokens[concept_id], device=xb.device)
 
     logits_before, intermediates_before = model(xb)
-    k_before = intermediates_before['k'][..., concept_id].mean()
+    alpha_before = intermediates_before['alpha_k'][..., concept_id].mean()
     mass_before = F.softmax(logits_before, dim=-1).index_select(-1, lifted).sum(dim=-1).mean()
 
     with steered(model, direction, gamma, inj_layer):
         logits_after, intermediates_after = model(xb)
-    k_after = intermediates_after['k'][..., concept_id].mean()
+    alpha_after = intermediates_after['alpha_k'][..., concept_id].mean()
     mass_after = F.softmax(logits_after, dim=-1).index_select(-1, lifted).sum(dim=-1).mean()
 
     return {
-        'respond_delta': (k_after - k_before).item(),
+        'respond_delta': (alpha_after - alpha_before).item(),
         'output_change_delta': (mass_after - mass_before).item(),
     }
 
@@ -308,7 +308,7 @@ def run_steering_batch(model, tokens, doc_records, doc_starts, n_train, n_concep
         logits, intermediates = model(model_input)
 
     lm_loss = lm_loss_from(logits)
-    r_loss = respond_loss(intermediates['k'], concept_id, position_mask)
+    r_loss = respond_loss(intermediates['alpha_k'], concept_id, position_mask)
     e_loss = express_loss(logits, lifted_tokens.get(concept_id, []), position_mask)
     total_loss = lm_loss + lambda_respond * r_loss + lambda_express * e_loss
 

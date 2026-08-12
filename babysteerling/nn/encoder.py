@@ -65,9 +65,8 @@ class SparseEmbeddingToConcept(BaseConceptLayer):
         # split into activation()/embed() so babysteerling.steering's InterventionModule can
         # wrap activation() alone, to intervene on concept activations without touching the
         # embedding step
-        u = self.activation(embeddings)
-        u_hat = self.embed(u)
-        return u, u_hat
+        alpha = self.activation(embeddings)
+        return alpha, self.embed(alpha)
 
     def ground_truth_embedding(self, known_labels):
         # weighted sum of K by the ground-truth labels; this is the reconstruction loss's target

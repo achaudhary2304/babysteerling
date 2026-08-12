@@ -44,7 +44,7 @@ def log_concept_activation_table(model, sample_ids, tok, concept_names, block_si
     concept) pair for the just-generated sample, so you can inspect which concepts fired where.
 
     Re-runs the generated ids through the model (chunked to block_size, since the position
-    embedding table doesn't cover longer sequences) to recover intermediates['k'], the per-token
+    embedding table doesn't cover longer sequences) to recover intermediates['alpha_k'], the per-token
     concept activation tensor. Runs in eval() mode, so the table reflects the model's actual
     learned routing, not one noisy training-time sample.
 
@@ -60,7 +60,7 @@ def log_concept_activation_table(model, sample_ids, tok, concept_names, block_si
         for start in range(0, len(sample_ids), block_size):
             chunk = torch.tensor([sample_ids[start:start + block_size]], device=device)
             _, intermediates = model(chunk)
-            k_chunks.append(intermediates['k'][0])  # shape: [chunk_len, n_concepts]
+            k_chunks.append(intermediates['alpha_k'][0])  # shape: [chunk_len, n_concepts]
         k_all = torch.cat(k_chunks, dim=0)  # shape: [total_len, n_concepts]
     model.train(was_training)
 
